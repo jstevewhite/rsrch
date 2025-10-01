@@ -19,6 +19,9 @@ from .stages import (
     RerankerClient,
     SearchResultReranker,
     Reflector,
+    ClaimExtractor,
+    ClaimVerifier,
+    VerificationReporter,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,6 +40,7 @@ class ResearchPipeline:
             api_key=config.api_key,
             api_endpoint=config.api_endpoint,
             default_model=config.default_model,
+            max_retries=config.llm_max_retries,
         )
         
         # Initialize stages
@@ -96,6 +100,27 @@ class ResearchPipeline:
             llm_client=self.llm_client,
             model=config.reflection_model,
         )
+        
+        # Initialize verification components (optional)
+        if config.verify_claims:
+            self.claim_extractor = ClaimExtractor(
+                llm_client=self.llm_client,
+                model=config.verify_model,
+            )
+            self.claim_verifier = ClaimVerifier(
+                llm_client=self.llm_client,
+                scraper=self.scraper,
+                model=config.verify_model,
+            )
+            self.verification_reporter = VerificationReporter(
+                confidence_threshold=config.verify_confidence_threshold,
+            )
+            logger.info(f"Claim verification enabled with model: {config.verify_model}")
+        else:
+            self.claim_extractor = None
+            self.claim_verifier = None
+            self.verification_reporter = None
+            logger.info("Claim verification disabled")
         
         logger.info("Research pipeline initialized")
     
@@ -253,6 +278,34 @@ class ResearchPipeline:
         # Stage 9: Generate report
         logger.info("Stage 9: Generating report...")
         report = self._generate_report(query, plan, final_summaries, final_reflection)
+        
+        # Stage 10: Verify claims (OPTIONAL)
+        if self.config.verify_claims and self.claim_extractor:
+            logger.info("Stage 10: Verifying claims...")
+            try:
+                # Extract claims and group by source
+                claims_by_source = self.claim_extractor.extract_and_group(
+                    report_text=report.content,
+                    summaries=final_summaries
+                )
+                
+                if claims_by_source:
+                    # Verify all claims
+                    results_by_source = self.claim_verifier.verify_all_sources(claims_by_source)
+                    
+                    # Create summary and annotate report
+                    verification_summary = self.verification_reporter.create_summary(results_by_source)
+                    report = self.verification_reporter.annotate_report(report, verification_summary)
+                    
+                    logger.info(f"✓ Verification complete: {verification_summary.supported_claims}/{verification_summary.total_claims} claims supported")
+                    if verification_summary.flagged_claims:
+                        logger.warning(f"⚠️  Flagged {len(verification_summary.flagged_claims)} claims for review")
+                else:
+                    logger.info("No claims found to verify")
+                    
+            except Exception as e:
+                logger.error(f"Verification stage failed: {e}")
+                logger.warning("Continuing with unverified report")
         
         # Save report
         report_path = self._save_report(report)

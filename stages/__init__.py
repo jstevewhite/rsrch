@@ -8,6 +8,7 @@ from .summarizer import Summarizer
 from .context_assembler import ContextAssembler, EmbeddingClient, VectorStore
 from .reranker import RerankerClient, SearchResultReranker
 from .reflector import Reflector
+from .verifier import ClaimExtractor, ClaimVerifier, VerificationReporter
 
 __all__ = [
     "IntentClassifier",
@@ -20,4 +21,8 @@ __all__ = [
     "VectorStore",
     "RerankerClient",
     "SearchResultReranker",
+    "Reflector",
+    "ClaimExtractor",
+    "ClaimVerifier",
+    "VerificationReporter",
 ]

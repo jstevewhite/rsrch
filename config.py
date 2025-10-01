@@ -49,6 +49,14 @@ class Config:
     # Reflection Configuration
     max_iterations: int  # Maximum research iterations (including initial)
     
+    # LLM Client Configuration
+    llm_max_retries: int  # Maximum retry attempts for empty/invalid LLM responses
+    
+    # Verification Configuration
+    verify_claims: bool  # Enable claim verification stage
+    verify_model: str  # Model to use for claim verification
+    verify_confidence_threshold: float  # Minimum confidence for flagging
+    
     # Output Configuration
     output_dir: Path
     log_level: str
@@ -105,6 +113,12 @@ class Config:
             use_reranker=get_optional("USE_RERANKER", "true").lower() in ("true", "1", "yes"),
             
             max_iterations=int(get_optional("MAX_ITERATIONS", "2")),
+            
+            llm_max_retries=int(get_optional("LLM_MAX_RETRIES", "3")),
+            
+            verify_claims=get_optional("VERIFY_CLAIMS", "false").lower() in ("true", "1", "yes"),
+            verify_model=get_optional("VERIFY_MODEL", "gpt-4o-mini"),
+            verify_confidence_threshold=float(get_optional("VERIFY_CONFIDENCE_THRESHOLD", "0.7")),
             
             output_dir=Path(get_optional("OUTPUT_DIR", "./reports")),
             log_level=get_optional("LOG_LEVEL", "INFO"),

@@ -107,3 +107,36 @@ class Report:
     citations: List[Citation]
     metadata: Dict[str, str]
     generated_at: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class ExtractedClaim:
+    """A factual claim extracted from a report."""
+    text: str                    # The claim text
+    source_number: int          # Which [Source N] cited
+    source_url: str             # Actual URL for that source
+    claim_type: str             # factual|statistic|quote|date
+    context: str = ""           # Surrounding text for context
+
+
+@dataclass
+class VerificationResult:
+    """Result of verifying a single claim."""
+    claim: ExtractedClaim
+    verdict: str                # supported|partial|unsupported|contradicted
+    confidence: float           # 0.0 to 1.0
+    evidence: Optional[str]     # Supporting quote from source
+    reasoning: str              # Brief explanation
+
+
+@dataclass
+class VerificationSummary:
+    """Summary of all verification results for a report."""
+    total_claims: int
+    supported_claims: int
+    partial_claims: int
+    unsupported_claims: int
+    contradicted_claims: int
+    flagged_claims: List[VerificationResult]
+    avg_confidence: float
+    by_source: Dict[str, List[VerificationResult]] = field(default_factory=dict)

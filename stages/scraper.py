@@ -31,6 +31,26 @@ class Scraper:
         self.use_fallback_count = 0
         self.max_workers = max_workers
     
+    def scrape_url(self, url: str, use_fallback: bool = True) -> Optional[ScrapedContent]:
+        """
+        Scrape a single URL.
+        
+        Public method for scraping individual URLs, useful for re-scraping
+        sources during claim verification.
+        
+        Args:
+            url: URL to scrape
+            use_fallback: Whether to use paid API fallbacks on failure (default: True)
+            
+        Returns:
+            ScrapedContent object, or None if scraping failed
+        """
+        try:
+            return self._scrape_single_url(url, use_fallback=use_fallback)
+        except Exception as e:
+            logger.error(f"Failed to scrape {url}: {e}")
+            return None
+    
     def scrape_results(self, search_results: List[SearchResult]) -> List[ScrapedContent]:
         """
         Scrape content from a list of search results.

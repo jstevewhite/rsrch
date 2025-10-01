@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import time
 from typing import List, Dict, Optional, Any
 from openai import OpenAI
 
@@ -12,11 +13,19 @@ logger = logging.getLogger(__name__)
 class LLMClient:
     """Client for interacting with LLMs."""
     
-    def __init__(self, api_key: str, api_endpoint: str, default_model: str):
-        """Initialize the LLM client."""
+    def __init__(self, api_key: str, api_endpoint: str, default_model: str, max_retries: int = 3):
+        """Initialize the LLM client.
+        
+        Args:
+            api_key: API key for the LLM service
+            api_endpoint: Base URL for the API endpoint
+            default_model: Default model to use
+            max_retries: Maximum number of retry attempts for empty/invalid responses (default: 3)
+        """
         self.client = OpenAI(api_key=api_key, base_url=api_endpoint)
         self.default_model = default_model
-        logger.info(f"Initialized LLM client with endpoint: {api_endpoint}")
+        self.max_retries = max_retries
+        logger.info(f"Initialized LLM client with endpoint: {api_endpoint}, max_retries: {max_retries}")
     
     def complete(
         self,
@@ -60,24 +69,53 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Generate a JSON completion from the LLM with robust parsing."""
-        response = self.complete(
-            prompt=prompt,
-            model=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            json_mode=True,
-        )
+        """Generate a JSON completion from the LLM with robust parsing and retry logic.
         
-        # Try multiple parsing strategies
-        parsed = self._parse_json_response(response)
-        if parsed is not None:
-            return parsed
+        Retries up to max_retries times with exponential backoff when:
+        - Response is empty or whitespace only
+        - Response cannot be parsed as valid JSON
+        """
+        last_error = None
         
-        # All parsing attempts failed
-        logger.error(f"Failed to parse JSON response after all attempts")
-        logger.error(f"Raw response (first 500 chars): {response[:500]}")
-        raise ValueError(f"Model returned invalid JSON. Response preview: {response[:200]}")
+        for attempt in range(self.max_retries):
+            try:
+                if attempt > 0:
+                    # Exponential backoff: 1s, 2s, 4s, etc.
+                    backoff = 2 ** (attempt - 1)
+                    logger.info(f"Retrying JSON completion (attempt {attempt + 1}/{self.max_retries}) after {backoff}s backoff...")
+                    time.sleep(backoff)
+                
+                response = self.complete(
+                    prompt=prompt,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    json_mode=True,
+                )
+                
+                # Try multiple parsing strategies
+                parsed = self._parse_json_response(response)
+                if parsed is not None:
+                    if attempt > 0:
+                        logger.info(f"Successfully parsed JSON on retry attempt {attempt + 1}")
+                    return parsed
+                
+                # Parsing failed but we have a response - save error and retry
+                last_error = ValueError(f"Model returned invalid JSON. Response preview: {response[:200]}")
+                logger.warning(f"Failed to parse JSON response on attempt {attempt + 1}/{self.max_retries}")
+                logger.debug(f"Raw response (first 500 chars): {response[:500]}")
+                
+            except Exception as e:
+                # Network or API error - save and retry
+                last_error = e
+                logger.warning(f"Error during JSON completion attempt {attempt + 1}/{self.max_retries}: {e}")
+        
+        # All retry attempts exhausted
+        logger.error(f"Failed to get valid JSON response after {self.max_retries} attempts")
+        if last_error:
+            raise last_error
+        else:
+            raise ValueError("Failed to get valid JSON response after all retry attempts")
     
     def _parse_json_response(self, response: str) -> Optional[Dict[str, Any]]:
         """Try multiple strategies to parse JSON from model response.

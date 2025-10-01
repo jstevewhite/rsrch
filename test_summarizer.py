@@ -35,7 +35,7 @@ def test_summarizer():
     # Load config
     try:
         config = Config.from_env()
-        print(f"✅ Config loaded (model: {config.mrs_model})")
+        print(f"✅ Config loaded (model: {config.mrs_model_default})")
     except Exception as e:
         print(f"❌ Failed to load config: {e}")
         return False
@@ -45,7 +45,8 @@ def test_summarizer():
         llm_client = LLMClient(
             api_key=config.api_key,
             api_endpoint=config.api_endpoint,
-            default_model=config.default_model
+            default_model=config.default_model,
+            max_retries=config.llm_max_retries
         )
         print("✅ LLM client initialized")
     except Exception as e:
@@ -56,7 +57,8 @@ def test_summarizer():
     try:
         summarizer = Summarizer(
             llm_client=llm_client,
-            model=config.mrs_model
+            default_model=config.mrs_model_default,
+            model_selector=config.get_mrs_model_for_content_type
         )
         print("✅ Summarizer initialized")
         print()
@@ -191,9 +193,14 @@ def test_long_content_chunking():
     llm_client = LLMClient(
         api_key=config.api_key,
         api_endpoint=config.api_endpoint,
-        default_model=config.default_model
+        default_model=config.default_model,
+        max_retries=config.llm_max_retries
     )
-    summarizer = Summarizer(llm_client=llm_client, model=config.mrs_model)
+    summarizer = Summarizer(
+        llm_client=llm_client,
+        default_model=config.mrs_model_default,
+        model_selector=config.get_mrs_model_for_content_type
+    )
     
     # Create long content (exceeds MAX_CHUNK_CHARS)
     long_text = """Python asyncio module """ * 2000  # Artificially long
