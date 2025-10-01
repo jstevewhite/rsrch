@@ -18,6 +18,7 @@ from .stages import (
     VectorStore,
     RerankerClient,
     SearchResultReranker,
+    Reflector,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,10 +56,11 @@ class ResearchPipeline:
         # Initialize scraper (content extraction)
         self.scraper = Scraper()
         
-        # Initialize summarizer
+        # Initialize summarizer with model selector
         self.summarizer = Summarizer(
             llm_client=self.llm_client,
-            model=config.mrs_model,  # Map-Reduce Summarization model
+            default_model=config.mrs_model_default,
+            model_selector=config.get_mrs_model_for_content_type,
         )
         
         # Initialize context assembler
@@ -89,10 +91,16 @@ class ResearchPipeline:
             self.search_reranker = None
             logger.info("Search result reranking disabled")
         
+        # Initialize reflector
+        self.reflector = Reflector(
+            llm_client=self.llm_client,
+            model=config.reflection_model,
+        )
+        
         logger.info("Research pipeline initialized")
     
     def run(self, query_text: str) -> Report:
-        """Run the complete research pipeline."""
+        """Run the complete research pipeline with iterative refinement."""
         logger.info(f"Starting research pipeline for query: {query_text[:100]}...")
         
         # Stage 1: Parse query
@@ -109,80 +117,142 @@ class ResearchPipeline:
         plan = self.planner.plan(query)
         logger.info(f"Research plan created with {len(plan.search_queries)} queries")
         
-        # Stage 4: Research (web search)
-        logger.info("Stage 4: Conducting research...")
-        try:
-            search_results = self.researcher.search(plan)
-            logger.info(f"Found {len(search_results)} search results")
-        except Exception as e:
-            logger.error(f"Research stage failed: {e}")
-            search_results = []
+        # Initialize for iterative research
+        all_summaries = []
+        iteration = 1
+        max_iterations = self.config.max_iterations
+        final_reflection = None  # Track final reflection result
         
-        # Stage 4.5: Rerank search results (before scraping)
-        if self.search_reranker and search_results:
-            logger.info("Stage 4.5: Reranking search results...")
-            try:
-                original_count = len(search_results)
-                search_results = self.search_reranker.rerank_search_results(
-                    query=plan.query.text,
-                    search_results=search_results
-                )
-                logger.info(f"Filtered from {original_count} to {len(search_results)} search results")
-            except Exception as e:
-                logger.error(f"Search reranking failed: {e}")
-                logger.warning("Continuing with all search results")
-        
-        # Stage 5: Scrape content
-        logger.info("Stage 5: Scraping content...")
-        try:
-            scraped_content = self.scraper.scrape_results(search_results)
-            logger.info(f"Scraped {len(scraped_content)} URLs")
+        # Iterative research loop
+        while iteration <= max_iterations:
+            if iteration > 1:
+                logger.info(f"\n{'='*80}")
+                logger.info(f"ITERATION {iteration}/{max_iterations} - Additional Research")
+                logger.info(f"{'='*80}\n")
+            else:
+                logger.info(f"\nITERATION {iteration}/{max_iterations} - Initial Research\n")
             
-            # Log scraper statistics
-            stats = self.scraper.get_fallback_usage_stats()
-            if stats['fallback_used'] > 0:
-                logger.info(f"Fallback scraping used: {stats['fallback_used']} times (cost: ${stats['estimated_cost']:.2f})")
-        except Exception as e:
-            logger.error(f"Scraping stage failed: {e}")
-            scraped_content = []
+            # Stage 4: Research (web search)
+            logger.info(f"Stage 4 (iter {iteration}): Conducting research...")
+            try:
+                search_results = self.researcher.search(plan)
+                logger.info(f"Found {len(search_results)} search results")
+            except Exception as e:
+                logger.error(f"Research stage failed: {e}")
+                search_results = []
         
-        # Stage 6: Generate summaries
-        logger.info("Stage 6: Generating summaries...")
-        try:
-            summaries = self.summarizer.summarize_all(
-                scraped_contents=scraped_content,
-                plan=plan,
-                max_summaries=None  # Summarize all content
-            )
-            logger.info(f"Generated {len(summaries)} summaries")
-        except Exception as e:
-            logger.error(f"Summarization stage failed: {e}")
-            summaries = []
+            # Stage 4.5: Rerank search results (before scraping)
+            if self.search_reranker and search_results:
+                logger.info(f"Stage 4.5 (iter {iteration}): Reranking search results...")
+                try:
+                    original_count = len(search_results)
+                    search_results = self.search_reranker.rerank_search_results(
+                        query=plan.query.text,
+                        search_results=search_results
+                    )
+                    logger.info(f"Filtered from {original_count} to {len(search_results)} search results")
+                except Exception as e:
+                    logger.error(f"Search reranking failed: {e}")
+                    logger.warning("Continuing with all search results")
         
-        # Stage 7: Assemble context
-        logger.info("Stage 7: Assembling context...")
+            # Stage 5: Scrape content
+            logger.info(f"Stage 5 (iter {iteration}): Scraping content...")
+            try:
+                scraped_content = self.scraper.scrape_results(search_results)
+                logger.info(f"Scraped {len(scraped_content)} URLs")
+                
+                # Log scraper statistics
+                stats = self.scraper.get_fallback_usage_stats()
+                if stats['fallback_used'] > 0:
+                    logger.info(f"Fallback scraping used: {stats['fallback_used']} times (cost: ${stats['estimated_cost']:.2f})")
+            except Exception as e:
+                logger.error(f"Scraping stage failed: {e}")
+                scraped_content = []
+        
+            # Stage 6: Generate summaries
+            logger.info(f"Stage 6 (iter {iteration}): Generating summaries...")
+            try:
+                summaries = self.summarizer.summarize_all(
+                    scraped_contents=scraped_content,
+                    plan=plan,
+                    max_summaries=None  # Summarize all content
+                )
+                logger.info(f"Generated {len(summaries)} summaries")
+            except Exception as e:
+                logger.error(f"Summarization stage failed: {e}")
+                summaries = []
+        
+            # Accumulate summaries from this iteration
+            all_summaries.extend(summaries)
+            logger.info(f"Total summaries accumulated: {len(all_summaries)}")
+        
+            # Stage 8: Reflection (evaluate completeness)
+            logger.info(f"Stage 8 (iter {iteration}): Reflecting on completeness...")
+            try:
+                reflection = self.reflector.reflect(
+                    query=query,
+                    plan=plan,
+                    summaries=all_summaries
+                )
+                
+                # Always save the latest reflection
+                final_reflection = reflection
+                
+                if not reflection.is_complete and reflection.additional_queries:
+                    logger.warning(f"Reflection identified {len(reflection.missing_information)} gaps")
+                    logger.info(f"Suggested {len(reflection.additional_queries)} additional queries")
+                    
+                    # Check if we can do another iteration
+                    if iteration < max_iterations:
+                        logger.info(f"Proceeding with iteration {iteration + 1} to address gaps")
+                        
+                        # Create new research plan with additional queries
+                        from .models import ResearchPlan
+                        plan = ResearchPlan(
+                            query=query,
+                            sections=plan.sections,
+                            search_queries=reflection.additional_queries,
+                            rationale=f"Iteration {iteration + 1}: {reflection.rationale}"
+                        )
+                        
+                        iteration += 1
+                        continue  # Continue the loop
+                    else:
+                        logger.warning(f"Maximum iterations ({max_iterations}) reached")
+                        logger.info("Proceeding with available summaries")
+                        break
+                else:
+                    logger.info("✓ Research deemed complete")
+                    break
+                    
+            except Exception as e:
+                logger.error(f"Reflection stage failed: {e}")
+                logger.warning("Proceeding without reflection")
+                break
+        
+        # End of iterative research loop
+        logger.info(f"\nCompleted {iteration} iteration(s) with {len(all_summaries)} total summaries\n")
+        
+        # Stage 7: Final context assembly (rank and filter all accumulated summaries)
+        logger.info("Stage 7: Assembling final context...")
         try:
             context = self.context_assembler.assemble_context(
-                summaries=summaries,
+                summaries=all_summaries,
                 plan=plan
             )
             logger.info(f"Context assembled: {context.additional_context['selected_summaries']}/{context.additional_context['total_summaries']} summaries selected")
             logger.info(f"Relevance range: {context.additional_context['min_relevance_score']:.3f} - {context.additional_context['max_relevance_score']:.3f}")
             
-            # Use filtered summaries from context
-            summaries = context.summaries
+            # Use filtered summaries for report
+            final_summaries = context.summaries
         except Exception as e:
             logger.error(f"Context assembly stage failed: {e}")
-            # Continue with all summaries if context assembly fails
             logger.warning("Using all summaries without re-ranking")
-        
-        # Stage 8: Reflection (stub - needs implementation)
-        logger.info("Stage 8: Reflecting on completeness...")
-        logger.warning("Reflection stage not yet implemented - using placeholder")
+            final_summaries = all_summaries
         
         # Stage 9: Generate report
         logger.info("Stage 9: Generating report...")
-        report = self._generate_report(query, plan, summaries)
+        report = self._generate_report(query, plan, final_summaries, final_reflection)
         
         # Save report
         report_path = self._save_report(report)
@@ -190,8 +260,15 @@ class ResearchPipeline:
         
         return report
     
-    def _generate_report(self, query: Query, plan, summaries: list) -> Report:
-        """Generate the final report from research summaries."""
+    def _generate_report(self, query: Query, plan, summaries: list, reflection=None) -> Report:
+        """Generate the final report from research summaries.
+        
+        Args:
+            query: Original query
+            plan: Research plan
+            summaries: Final summaries for report
+            reflection: Optional reflection result with gaps identified
+        """
         
         # Build context from summaries
         if summaries:
@@ -200,7 +277,50 @@ class ResearchPipeline:
                 for i, summary in enumerate(summaries)
             ])
             
-            prompt = f"""Generate a comprehensive research report based on the following research.
+            # Add source-grounding context
+            from datetime import datetime, timezone
+            current_date = datetime.now(timezone.utc).strftime("%B %d, %Y")
+            
+            source_grounding = f"""CRITICAL INSTRUCTIONS - SOURCE PRIORITIZATION:
+
+Current Date: {current_date}
+
+YOU MUST FOLLOW THESE RULES ABSOLUTELY:
+
+1. **TRUST THE RESEARCH SOURCES COMPLETELY**
+   - The sources below are MORE RECENT and MORE ACCURATE than your training data
+   - If sources contradict what you "know", the SOURCES ARE CORRECT
+   - Your training data may be outdated - defer to the provided research
+
+2. **NEVER CORRECT OR "FIX" THE SOURCES**
+   - Do not change names, titles, positions, dates, or facts from the sources
+   - If sources say someone holds a position, accept it - do not "correct" based on your knowledge
+   - If sources describe current events, treat them as current regardless of your training cutoff
+
+3. **WRITE BASED ON SOURCES, NOT YOUR KNOWLEDGE**
+   - Report exactly what the sources say
+   - Do not add context like "former" or "current" unless it appears in the sources
+   - Do not add qualifiers like "as of [date]" or "at the time" unless they're in the sources
+   - Do not add background information from your training if it contradicts the sources
+
+4. **WHEN IN DOUBT, STAY CLOSER TO THE SOURCE TEXT**
+   - If something seems unusual, that's because the world has changed since your training
+   - Preserve the sources' language and framing
+   - Your job is to SYNTHESIZE THE RESEARCH, not to FACT-CHECK against outdated knowledge
+
+5. **SOURCE CITATIONS ARE MANDATORY**
+   - Use [Source N] citations for EVERY factual claim
+   - Base EVERY statement on the provided sources
+   - Do not speculate or infer beyond what sources state
+
+REMEMBER: The research sources reflect REALITY. Your training data reflects THE PAST.
+"""
+            
+            prompt = f"""{source_grounding}
+
+---
+
+Generate a comprehensive research report based on the following research.
 
 Query: "{query.text}"
 Intent: {query.intent.value if query.intent else "general"}
@@ -211,17 +331,15 @@ Report Sections to Cover:
 Research Summaries:
 {sources_text}
 
-CRITICAL INSTRUCTIONS - READ CAREFULLY:
+ADDITIONAL QUALITY GUIDELINES:
 1. You are writing a FACTUAL RESEARCH REPORT, not a creative story
-2. DO NOT invent contradictions, controversies, or disputes that are not explicitly present in the sources
-3. DO NOT claim sources "contradict" each other unless they make directly opposing statements about the same fact
+2. DO NOT invent contradictions, controversies, or disputes not in the sources
+3. DO NOT claim sources "contradict" each other unless they make directly opposing statements
 4. If all sources agree on something, report it as established fact - do not manufacture doubt
-5. Base EVERY statement on the provided sources - do not speculate, infer, or add dramatic framing
-6. If a source clearly states something exists or is true, report it as such - do not hedge with "allegedly" or "claims to be"
-7. Use [Source N] citations for EVERY factual claim
-8. When official/primary sources (GitHub, official docs) exist, they are authoritative - trust them over blog speculation
-9. Only report what sources ACTUALLY say - do not paraphrase in ways that change meaning
-10. Your goal is ACCURACY and CLARITY, not drama or "comprehensive analysis of contradictions"
+5. If a source clearly states something exists or is true, report it as such
+6. When official/primary sources exist, they are authoritative
+7. Only report what sources ACTUALLY say - do not paraphrase in ways that change meaning
+8. Your goal is ACCURACY and CLARITY, not drama
 
 Please provide a well-structured report with:
 1. Executive summary
@@ -268,6 +386,9 @@ Format the report in Markdown.
             for summary in summaries:
                 all_citations.extend(summary.citations)
             
+            # Check if research was complete
+            research_complete = reflection.is_complete if reflection else True
+            
             report = Report(
                 query=query,
                 content=content,
@@ -275,8 +396,11 @@ Format the report in Markdown.
                 metadata={
                     "intent": query.intent.value if query.intent else "unknown",
                     "sections": str(plan.sections),
-                    "status": "complete" if summaries else "preliminary",
+                    "status": "complete" if research_complete else "incomplete",
                     "num_sources": len(summaries),
+                    "research_complete": research_complete,
+                    "missing_information": reflection.missing_information if reflection and not reflection.is_complete else [],
+                    "reflection_rationale": reflection.rationale if reflection else "",
                 },
             )
             
@@ -311,10 +435,32 @@ Format the report in Markdown.
                         f.write(f"- Chunk: {citation.chunk_id}\n")
                     f.write("\n")
             
+            # Add research limitations if incomplete
+            if not report.metadata.get("research_complete", True):
+                missing_info = report.metadata.get("missing_information", [])
+                rationale = report.metadata.get("reflection_rationale", "")
+                
+                if missing_info:
+                    f.write("\n\n---\n\n")
+                    f.write("## ⚠️ Research Limitations\n\n")
+                    f.write("This report was generated with the maximum number of research iterations, ")
+                    f.write("but the following information gaps were identified:\n\n")
+                    
+                    for i, gap in enumerate(missing_info, 1):
+                        f.write(f"{i}. {gap}\n")
+                    
+                    if rationale:
+                        f.write(f"\n**Assessment:** {rationale}\n")
+                    
+                    f.write("\n*Note: The report above is based on available sources. ")
+                    f.write("Additional research may be needed to fully address these gaps.*\n")
+            
             # Add metadata
             f.write("\n---\n\n")
             f.write(f"**Metadata:**\n")
             for key, value in report.metadata.items():
-                f.write(f"- {key}: {value}\n")
+                # Skip internal fields that were already presented
+                if key not in ["missing_information", "reflection_rationale"]:
+                    f.write(f"- {key}: {value}\n")
         
         return filepath

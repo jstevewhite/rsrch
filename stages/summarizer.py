@@ -1,11 +1,13 @@
 """Summarization stage - generates summaries with citations from scraped content."""
 
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from ..models import ScrapedContent, Summary, Citation, ResearchPlan
 from ..llm_client import LLMClient
+from .content_detector import ContentPatterns, ContentType
 
 logger = logging.getLogger(__name__)
 
@@ -38,17 +40,83 @@ class Summarizer:
     # Direct summarization threshold (no chunking needed)
     DIRECT_SUMMARIZATION_CHARS = 50000  # ~12,500 tokens
     
-    def __init__(self, llm_client: LLMClient, model: str = "gpt-4o-mini"):
+    def __init__(
+        self, 
+        llm_client: LLMClient, 
+        default_model: str = "gpt-4o-mini",
+        model_selector: Optional[Callable[[str], str]] = None
+    ):
         """
         Initialize the summarizer.
         
         Args:
             llm_client: LLM client for generating summaries
-            model: Model to use for summarization
+            default_model: Default model to use for summarization
+            model_selector: Optional function that takes content type and returns model name
         """
         self.llm_client = llm_client
-        self.model = model
-        logger.info(f"Summarizer initialized with model: {model}")
+        self.default_model = default_model
+        self.model_selector = model_selector
+        logger.info(f"Summarizer initialized with default model: {default_model}")
+    
+    def _select_model(self, url: str) -> str:
+        """Select the appropriate model based on URL content type.
+        
+        Args:
+            url: URL to analyze for content type
+            
+        Returns:
+            Model name to use for summarization
+        """
+        # If no model selector is provided, use default
+        if not self.model_selector:
+            return self.default_model
+        
+        # Detect content type from URL
+        content_type = ContentPatterns.detect_from_url(url)
+        
+        # Get model for content type
+        model = self.model_selector(content_type.value)
+        
+        logger.debug(f"Selected model '{model}' for content type '{content_type.value}' (URL: {url})")
+        return model
+    
+    def _get_source_grounding_context(self) -> str:
+        """Generate instructions to prioritize source content over training data.
+        
+        Returns:
+            Formatted source-grounding instructions
+        """
+        current_date = datetime.now(timezone.utc)
+        date_str = current_date.strftime("%B %d, %Y")
+        
+        return f"""CRITICAL INSTRUCTIONS - SOURCE PRIORITIZATION:
+
+Current Date: {date_str}
+
+YOU MUST FOLLOW THESE RULES ABSOLUTELY:
+
+1. **TRUST THE SOURCE MATERIAL COMPLETELY**
+   - The content provided below is MORE RECENT and MORE ACCURATE than your training data
+   - If the source contradicts what you "know", the SOURCE IS CORRECT
+   - Your training data may be outdated - defer to the provided content
+
+2. **NEVER CORRECT OR "FIX" THE SOURCE**
+   - Do not change names, titles, positions, dates, or facts from the source
+   - If the source says someone is President, accept it - do not "correct" based on your knowledge
+   - If the source describes current events, treat them as current regardless of your training cutoff
+
+3. **SUMMARIZE WHAT IS WRITTEN, NOT WHAT YOU THINK**
+   - Report exactly what the source says
+   - Do not add context like "former" or "current" unless it appears in the source
+   - Do not add qualifiers like "as of [date]" or "at the time" unless they're in the source
+
+4. **WHEN IN DOUBT, QUOTE THE SOURCE**
+   - If something seems unusual, that's because the world has changed since your training
+   - Preserve the source's language and framing
+   - Your job is to SUMMARIZE, not to FACT-CHECK
+
+REMEMBER: The source material reflects REALITY. Your training data reflects THE PAST."""
     
     def summarize_all(
         self, 
@@ -158,10 +226,13 @@ class Summarizer:
             sections=plan.sections
         )
         
+        # Select appropriate model based on content type
+        model = self._select_model(content.url)
+        
         try:
             summary_text = self.llm_client.complete(
                 prompt=prompt,
-                model=self.model,
+                model=model,
                 temperature=0.3,  # Lower temp for factual summarization
                 max_tokens=1000,
             )
@@ -347,7 +418,13 @@ class Summarizer:
         
         logger.debug(f"Summarizing chunk {chunk_id}: {chunk_len:,} chars (~{chunk_len // self.CHARS_PER_TOKEN:,} tokens)")
         
-        prompt = f"""Summarize the following content chunk in relation to the research query.
+        source_grounding = self._get_source_grounding_context()
+        
+        prompt = f"""{source_grounding}
+
+---
+
+Summarize the following content chunk in relation to the research query.
 
 Research Query: "{query}"
 
@@ -359,12 +436,15 @@ Content:
 {chunk}
 
 Provide a concise summary focusing on information relevant to the research query.
-Extract key facts, findings, and insights. Aim for 2-3 paragraphs."""
+Extract key facts, findings, and insights. Maintain temporal accuracy. Aim for 2-3 paragraphs."""
 
+        # Select appropriate model based on content type
+        model = self._select_model(url)
+        
         try:
             summary_text = self.llm_client.complete(
                 prompt=prompt,
-                model=self.model,
+                model=model,
                 temperature=0.3,
                 max_tokens=500,
             )
@@ -404,7 +484,13 @@ Extract key facts, findings, and insights. Aim for 2-3 paragraphs."""
         # Combine all chunk summaries
         combined_text = '\n\n'.join([cs.text for cs in chunk_summaries])
         
-        prompt = f"""Synthesize the following summaries into a coherent final summary.
+        source_grounding = self._get_source_grounding_context()
+        
+        prompt = f"""{source_grounding}
+
+---
+
+Synthesize the following summaries into a coherent final summary.
 
 Research Query: "{query}"
 Source: {title}
@@ -420,14 +506,17 @@ Create a comprehensive summary that:
 1. Eliminates redundancy across chunks
 2. Organizes information logically
 3. Highlights key findings relevant to the research query
-4. Maintains factual accuracy
+4. Maintains factual accuracy and temporal correctness
 
 Aim for 3-5 paragraphs."""
 
+        # Select appropriate model based on content type
+        model = self._select_model(url)
+        
         try:
             final_text = self.llm_client.complete(
                 prompt=prompt,
-                model=self.model,
+                model=model,
                 temperature=0.3,
                 max_tokens=1000,
             )
@@ -471,7 +560,13 @@ Aim for 3-5 paragraphs."""
         Returns:
             Formatted prompt string
         """
-        return f"""Summarize the following content in relation to the research query.
+        source_grounding = self._get_source_grounding_context()
+        
+        return f"""{source_grounding}
+
+---
+
+Summarize the following content in relation to the research query.
 
 Research Query: "{query}"
 
@@ -487,7 +582,7 @@ Content:
 Provide a comprehensive summary that:
 1. Extracts key information relevant to the research query
 2. Identifies main findings, arguments, or insights
-3. Maintains factual accuracy
+3. Maintains factual accuracy and temporal correctness
 4. Organizes information clearly
 
 Aim for 3-5 paragraphs. Focus on substance over style."""

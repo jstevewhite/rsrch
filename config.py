@@ -19,7 +19,12 @@ class Config:
     # Stage-Specific Models
     intent_model: str
     planner_model: str
-    mrs_model: str
+    mrs_model_default: str
+    mrs_model_code: Optional[str]
+    mrs_model_research: Optional[str]
+    mrs_model_news: Optional[str]
+    mrs_model_documentation: Optional[str]
+    mrs_model_general: Optional[str]
     context_model: str
     reflection_model: str
     report_model: str
@@ -40,6 +45,9 @@ class Config:
     reranker_model: Optional[str]
     reranker_api_key: Optional[str]
     use_reranker: bool
+    
+    # Reflection Configuration
+    max_iterations: int  # Maximum research iterations (including initial)
     
     # Output Configuration
     output_dir: Path
@@ -72,7 +80,12 @@ class Config:
             
             intent_model=get_optional("INTENT_MODEL", os.getenv("DEFAULT_MODEL", "gpt-4o-mini")),
             planner_model=get_optional("PLANNER_MODEL", os.getenv("DEFAULT_MODEL", "gpt-4o")),
-            mrs_model=get_optional("MRS_MODEL", os.getenv("DEFAULT_MODEL", "gpt-4o-mini")),
+            mrs_model_default=get_optional("MRS_MODEL_DEFAULT", os.getenv("DEFAULT_MODEL", "gpt-4o-mini")),
+            mrs_model_code=os.getenv("MRS_MODEL_CODE"),
+            mrs_model_research=os.getenv("MRS_MODEL_RESEARCH"),
+            mrs_model_news=os.getenv("MRS_MODEL_NEWS"),
+            mrs_model_documentation=os.getenv("MRS_MODEL_DOCUMENTATION"),
+            mrs_model_general=os.getenv("MRS_MODEL_GENERAL"),
             context_model=get_optional("CONTEXT_MODEL", os.getenv("DEFAULT_MODEL", "gpt-4o-mini")),
             reflection_model=get_optional("REFLECTION_MODEL", os.getenv("DEFAULT_MODEL", "gpt-4o")),
             report_model=get_optional("REPORT_MODEL", os.getenv("DEFAULT_MODEL", "gpt-4o")),
@@ -91,10 +104,42 @@ class Config:
             reranker_api_key=os.getenv("RERANKER_API_KEY"),
             use_reranker=get_optional("USE_RERANKER", "true").lower() in ("true", "1", "yes"),
             
+            max_iterations=int(get_optional("MAX_ITERATIONS", "2")),
+            
             output_dir=Path(get_optional("OUTPUT_DIR", "./reports")),
             log_level=get_optional("LOG_LEVEL", "INFO"),
             report_max_tokens=int(get_optional("REPORT_MAX_TOKENS", "4000")),
         )
+    
+    def get_mrs_model_for_content_type(self, content_type: str) -> str:
+        """Get the appropriate MRS model for a content type.
+        
+        Args:
+            content_type: Content type from ContentType enum (e.g., 'code', 'research')
+            
+        Returns:
+            Model name to use for this content type
+        """
+        # Map content type to corresponding model attribute
+        content_type_map = {
+            'code': self.mrs_model_code,
+            'research': self.mrs_model_research,
+            'news': self.mrs_model_news,
+            'documentation': self.mrs_model_documentation,
+            'general': self.mrs_model_general,
+        }
+        
+        # Get content-specific model or fall back to general, then default
+        model = content_type_map.get(content_type.lower())
+        if model:
+            return model
+        
+        # Fall back to general model if configured
+        if self.mrs_model_general:
+            return self.mrs_model_general
+        
+        # Final fallback to default
+        return self.mrs_model_default
     
     def ensure_directories(self):
         """Create necessary directories."""
