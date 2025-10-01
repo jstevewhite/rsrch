@@ -26,15 +26,25 @@ class Config:
     
     # Search Configuration
     serp_api_key: Optional[str]
-    rerank_top_k: float
+    rerank_top_k_url: float  # Ratio of search results to scrape (Stage 4.5)
+    rerank_top_k_sum: float  # Ratio of summaries to include in report (Stage 7)
     
     # Vector Database Configuration
     vector_db_path: Path
     embedding_model: str
+    embedding_url: str
+    embedding_api_key: Optional[str]
+    
+    # Reranker Configuration
+    reranker_url: Optional[str]
+    reranker_model: Optional[str]
+    reranker_api_key: Optional[str]
+    use_reranker: bool
     
     # Output Configuration
     output_dir: Path
     log_level: str
+    report_max_tokens: int
     
     @classmethod
     def from_env(cls, env_file: Optional[str] = None) -> "Config":
@@ -68,13 +78,22 @@ class Config:
             report_model=get_optional("REPORT_MODEL", os.getenv("DEFAULT_MODEL", "gpt-4o")),
             
             serp_api_key=os.getenv("SERP_API_KEY"),
-            rerank_top_k=float(get_optional("RERANK_TOP_K", "0.25")),
+            rerank_top_k_url=float(get_optional("RERANK_TOP_K_URL", "0.25")),
+            rerank_top_k_sum=float(get_optional("RERANK_TOP_K_SUM", "0.25")),
             
             vector_db_path=Path(get_optional("VECTOR_DB_PATH", "./research_db.sqlite")),
             embedding_model=get_optional("EMBEDDING_MODEL", "text-embedding-3-small"),
+            embedding_url=get_optional("EMBEDDING_URL", os.getenv("API_ENDPOINT", "https://api.openai.com/v1")),
+            embedding_api_key=os.getenv("EMBEDDING_API_KEY", os.getenv("API_KEY")),
+            
+            reranker_url=os.getenv("RERANKER_URL"),
+            reranker_model=os.getenv("RERANKER_MODEL"),
+            reranker_api_key=os.getenv("RERANKER_API_KEY"),
+            use_reranker=get_optional("USE_RERANKER", "true").lower() in ("true", "1", "yes"),
             
             output_dir=Path(get_optional("OUTPUT_DIR", "./reports")),
             log_level=get_optional("LOG_LEVEL", "INFO"),
+            report_max_tokens=int(get_optional("REPORT_MAX_TOKENS", "4000")),
         )
     
     def ensure_directories(self):

@@ -1,7 +1,9 @@
-"""Research stage - conducts web searches using serper-api-mcp."""
+"""Research stage - conducts web searches using Serper API."""
 
 import logging
-from typing import List
+import os
+import requests
+from typing import List, Dict, Any
 from ..models import ResearchPlan, SearchResult, Intent
 
 logger = logging.getLogger(__name__)
@@ -18,10 +20,10 @@ class Researcher:
         """
         Execute searches based on the research plan.
         
-        Uses intent-aware search tool selection:
-        - NEWS intent -> search_news
-        - RESEARCH intent -> search_scholar
-        - Others -> search (general web search)
+        Uses intent-aware search type selection:
+        - NEWS intent -> news search
+        - RESEARCH intent -> scholar search
+        - Others -> general web search
         
         Args:
             plan: The research plan containing search queries
@@ -31,9 +33,9 @@ class Researcher:
         """
         logger.info(f"Executing research with {len(plan.search_queries)} queries")
         
-        # Determine which search tool to use based on intent
-        search_tool = self._select_search_tool(plan.query.intent)
-        logger.info(f"Using search tool: {search_tool}")
+        # Determine which search type to use based on intent
+        search_type = self._select_search_type(plan.query.intent)
+        logger.info(f"Using search type: {search_type}")
         
         all_results = []
         
@@ -42,22 +44,14 @@ class Researcher:
             logger.info(f"Query {i+1}/{len(plan.search_queries)}: {search_query.query}")
             
             try:
-                # TODO: Implement actual MCP tool call
-                # results = call_mcp_tool(
-                #     name=search_tool,
-                #     input={
-                #         "query": search_query.query,
-                #         "num_results": 10,
-                #         "country_code": "us",
-                #         "language": "en"
-                #     }
-                # )
+                # Execute search via Serper API
+                results = self._execute_search(
+                    query=search_query.query,
+                    search_type=search_type,
+                    num_results=10
+                )
                 
-                # Parse results into SearchResult objects
-                # For now, placeholder:
-                logger.warning("MCP tool call not yet implemented - using placeholder")
-                results = []
-                
+                logger.info(f"Found {len(results)} results for query: {search_query.query}")
                 all_results.extend(results)
                 
             except Exception as e:
@@ -67,19 +61,106 @@ class Researcher:
         logger.info(f"Research complete: found {len(all_results)} total results")
         return all_results
     
-    def _select_search_tool(self, intent: Intent) -> str:
+    def _select_search_type(self, intent: Intent) -> str:
         """
-        Select appropriate search tool based on query intent.
+        Select appropriate search type based on query intent.
         
         Args:
             intent: The classified query intent
             
         Returns:
-            Name of the search tool to use
+            Serper API search type ('search', 'news', or 'scholar')
         """
         if intent == Intent.NEWS:
-            return "search_news"
+            return "news"
         elif intent == Intent.RESEARCH:
-            return "search_scholar"
+            return "scholar"
         else:
             return "search"
+    
+    def _execute_search(self, query: str, search_type: str = "search", num_results: int = 10) -> List[SearchResult]:
+        """
+        Execute a search using Serper API.
+        
+        Args:
+            query: Search query string
+            search_type: Type of search ('search', 'news', or 'scholar')
+            num_results: Number of results to return
+            
+        Returns:
+            List of SearchResult objects
+            
+        Raises:
+            Exception if API call fails
+        """
+        serper_api_key = os.getenv('SERPER_API_KEY')
+        if not serper_api_key:
+            raise Exception("SERPER_API_KEY not found in environment")
+        
+        # Serper API endpoint
+        url = "https://google.serper.dev/search"
+        
+        # Prepare request
+        headers = {
+            'X-API-KEY': serper_api_key,
+            'Content-Type': 'application/json'
+        }
+        
+        payload = {
+            'q': query,
+            'num': num_results,
+            'type': search_type  # 'search', 'news', or 'scholar'
+        }
+        
+        try:
+            logger.debug(f"Calling Serper API: type={search_type}, query={query}")
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            return self._parse_serper_response(data, search_type)
+            
+        except requests.RequestException as e:
+            logger.error(f"Serper API request failed: {e}")
+            raise
+    
+    def _parse_serper_response(self, data: Dict[str, Any], search_type: str) -> List[SearchResult]:
+        """
+        Parse Serper API response into SearchResult objects.
+        
+        Args:
+            data: JSON response from Serper API
+            search_type: Type of search that was performed
+            
+        Returns:
+            List of SearchResult objects
+        """
+        results = []
+        
+        # Different response structures for different search types
+        if search_type == "news":
+            # News results are in 'news' field
+            items = data.get('news', [])
+        elif search_type == "scholar":
+            # Scholar results are in 'organic' field
+            items = data.get('organic', [])
+        else:
+            # Regular search results are in 'organic' field
+            items = data.get('organic', [])
+        
+        # Parse each result
+        for i, item in enumerate(items):
+            try:
+                result = SearchResult(
+                    url=item.get('link', ''),
+                    title=item.get('title', ''),
+                    snippet=item.get('snippet', ''),
+                    rank=i + 1,
+                    relevance_score=None  # Serper doesn't provide scores
+                )
+                results.append(result)
+            except Exception as e:
+                logger.warning(f"Error parsing search result: {e}")
+                continue
+        
+        return results

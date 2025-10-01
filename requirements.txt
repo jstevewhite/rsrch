@@ -1,6 +1,7 @@
 # Core dependencies
 openai>=1.0.0
 python-dotenv>=1.0.0
+numpy>=1.24.0
 
 # Optional dependencies for future implementation
 beautifulsoup4>=4.12.0

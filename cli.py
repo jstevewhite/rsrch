@@ -6,8 +6,8 @@ import logging
 import argparse
 from pathlib import Path
 
-from config import Config
-from pipeline import ResearchPipeline
+from rsrch.config import Config
+from rsrch.pipeline import ResearchPipeline
 
 
 def setup_logging(level: str = "INFO"):
@@ -92,7 +92,12 @@ def main():
         print(f"\n{'='*80}")
         print(f"Report Generated Successfully")
         print(f"{'='*80}")
-        print(f"Report saved to: {config.output_dir / f'report_{report.generated_at.strftime(\"%Y%m%d_%H%M%S\")}.md'}")
+        
+        # Build report filename
+        report_filename = f"report_{report.generated_at.strftime('%Y%m%d_%H%M%S')}.md"
+        report_path = config.output_dir / report_filename
+        print(f"Report saved to: {report_path}")
+        
         print(f"\nPreview:")
         print(f"{'-'*80}")
         

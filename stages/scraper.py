@@ -3,6 +3,7 @@
 import logging
 import requests
 from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 from ..models import SearchResult, ScrapedContent
 
@@ -21,10 +22,14 @@ class Scraper:
     # User agent to avoid basic bot detection
     USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
     
-    def __init__(self):
-        """Initialize the scraper."""
+    def __init__(self, max_workers: int = 5):
+        """Initialize the scraper.
+        
+        Args:
+            max_workers: Maximum number of parallel scraping threads (default: 5)
+        """
         self.use_fallback_count = 0
-        pass
+        self.max_workers = max_workers
     
     def scrape_results(self, search_results: List[SearchResult]) -> List[ScrapedContent]:
         """
@@ -52,7 +57,10 @@ class Scraper:
     
     def _scrape_parallel(self, urls: List[str], search_results: List[SearchResult]) -> List[ScrapedContent]:
         """
-        Scrape multiple URLs in parallel using parallel_read_url.
+        Scrape multiple URLs in parallel using ThreadPoolExecutor.
+        
+        Uses multiple threads to scrape URLs concurrently, significantly
+        faster than sequential scraping for I/O-bound operations.
         
         Args:
             urls: List of URLs to scrape
@@ -61,19 +69,56 @@ class Scraper:
         Returns:
             List of ScrapedContent objects
         """
-        logger.info("Using parallel_read_url for batch scraping")
+        logger.info(f"Starting parallel scraping of {len(urls)} URLs with {self.max_workers} workers")
         
-        # TODO: Implement actual MCP tool call
-        # results = call_mcp_tool(
-        #     name="parallel_read_url",
-        #     input={
-        #         "urls": [{"url": url} for url in urls]
-        #     }
-        # )
+        scraped = []
+        failed_urls = []
         
-        # Parse and return scraped content
-        logger.warning("MCP parallel_read_url not yet implemented - using placeholder")
-        return []
+        # Use ThreadPoolExecutor for parallel scraping
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all scraping tasks
+            future_to_url = {
+                executor.submit(self._scrape_single_url_safe, url): url 
+                for url in urls
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_url):
+                url = future_to_url[future]
+                try:
+                    content = future.result()
+                    if content:
+                        scraped.append(content)
+                        logger.debug(f"✓ Scraped: {url}")
+                    else:
+                        failed_urls.append(url)
+                        logger.warning(f"✗ Failed to scrape: {url}")
+                except Exception as e:
+                    failed_urls.append(url)
+                    logger.error(f"✗ Error scraping {url}: {e}")
+        
+        logger.info(f"Parallel scraping complete: {len(scraped)}/{len(urls)} successful")
+        if failed_urls:
+            logger.warning(f"Failed URLs: {failed_urls}")
+        
+        return scraped
+    
+    def _scrape_single_url_safe(self, url: str) -> Optional[ScrapedContent]:
+        """
+        Safely scrape a single URL (returns None on failure instead of raising).
+        Used for parallel scraping where we want to continue on errors.
+        
+        Args:
+            url: URL to scrape
+            
+        Returns:
+            ScrapedContent object or None if scraping failed
+        """
+        try:
+            return self._scrape_single_url(url, use_fallback=True)
+        except Exception as e:
+            logger.debug(f"Safe scrape failed for {url}: {e}")
+            return None
     
     def _scrape_sequential(self, urls: List[str], search_results: List[SearchResult]) -> List[ScrapedContent]:
         """
