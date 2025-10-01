@@ -7,6 +7,7 @@ from .scraper import Scraper
 from .summarizer import Summarizer
 from .context_assembler import ContextAssembler, EmbeddingClient, VectorStore
 from .reranker import RerankerClient, SearchResultReranker
+from .reflector import Reflector
 
 __all__ = [
     "IntentClassifier",

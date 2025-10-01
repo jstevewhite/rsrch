@@ -67,7 +67,7 @@ Priority is 1 (highest) to 5 (lowest).
                 response = self.llm_client.complete_json(
                     prompt=prompt,
                     model=self.model,
-                    temperature=0.7,
+                    temperature=0.3,  # Lower temp for reliable JSON output
                     max_tokens=2000,
                 )
                 

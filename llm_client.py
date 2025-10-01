@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from typing import List, Dict, Optional, Any
 from openai import OpenAI
 
@@ -59,7 +60,7 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Generate a JSON completion from the LLM."""
+        """Generate a JSON completion from the LLM with robust parsing."""
         response = self.complete(
             prompt=prompt,
             model=model,
@@ -68,12 +69,89 @@ class LLMClient:
             json_mode=True,
         )
         
+        # Try multiple parsing strategies
+        parsed = self._parse_json_response(response)
+        if parsed is not None:
+            return parsed
+        
+        # All parsing attempts failed
+        logger.error(f"Failed to parse JSON response after all attempts")
+        logger.error(f"Raw response (first 500 chars): {response[:500]}")
+        raise ValueError(f"Model returned invalid JSON. Response preview: {response[:200]}")
+    
+    def _parse_json_response(self, response: str) -> Optional[Dict[str, Any]]:
+        """Try multiple strategies to parse JSON from model response.
+        
+        Args:
+            response: Raw model response
+            
+        Returns:
+            Parsed JSON dict, or None if all attempts fail
+        """
+        if not response or not response.strip():
+            logger.error("Response was empty or whitespace only")
+            return None
+        
+        # Strategy 1: Direct JSON parse (standard case)
         try:
             return json.loads(response)
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON response: {e}")
-            logger.debug(f"Response was: {response}")
-            raise
+        except json.JSONDecodeError:
+            logger.debug("Direct JSON parse failed, trying alternatives...")
+        
+        # Strategy 2: Extract from markdown code block with ```json
+        json_match = re.search(r'```json\s*\n(.+?)\n```', response, re.DOTALL)
+        if json_match:
+            try:
+                logger.debug("Found JSON in ```json code block")
+                return json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                logger.debug("JSON code block parse failed")
+        
+        # Strategy 3: Extract from any markdown code block ```
+        code_match = re.search(r'```\s*\n(.+?)\n```', response, re.DOTALL)
+        if code_match:
+            try:
+                logger.debug("Found content in ``` code block")
+                return json.loads(code_match.group(1))
+            except json.JSONDecodeError:
+                logger.debug("Generic code block parse failed")
+        
+        # Strategy 4: Extract from inline code blocks `{...}`
+        inline_match = re.search(r'`({.+?})`', response, re.DOTALL)
+        if inline_match:
+            try:
+                logger.debug("Found JSON in inline code block")
+                return json.loads(inline_match.group(1))
+            except json.JSONDecodeError:
+                logger.debug("Inline code block parse failed")
+        
+        # Strategy 5: Find JSON object by looking for { ... } pattern
+        # This handles cases where JSON is embedded in prose
+        brace_match = re.search(r'(\{[^{}]*\{[^{}]*\}[^{}]*\}|\{[^{}]+\})', response, re.DOTALL)
+        if brace_match:
+            try:
+                logger.debug("Found JSON-like braces pattern")
+                return json.loads(brace_match.group(1))
+            except json.JSONDecodeError:
+                logger.debug("Brace pattern parse failed")
+        
+        # Strategy 6: Try stripping common prefixes/suffixes
+        cleaned = response.strip()
+        for prefix in ['```json', '```', 'json:', 'JSON:', 'Response:', 'Output:']:
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):].strip()
+        for suffix in ['```']:
+            if cleaned.endswith(suffix):
+                cleaned = cleaned[:-len(suffix)].strip()
+        
+        if cleaned != response:
+            try:
+                logger.debug("Trying cleaned response after stripping markers")
+                return json.loads(cleaned)
+            except json.JSONDecodeError:
+                logger.debug("Cleaned response parse failed")
+        
+        return None
     
     def embed(self, texts: List[str], model: Optional[str] = None) -> List[List[float]]:
         """Generate embeddings for the given texts."""
