@@ -2,44 +2,67 @@
 
 Get your research pipeline up and running in 5 minutes!
 
-## 1. Install Dependencies
+## 1) Install (PEP 660 editable)
+
+Modern, location-independent install that works from anywhere and across symlinks:
 
 ```bash
-cd /Users/stwhite/CODE/rsrch
+pip install -e .
+```
+
+This uses pyproject.toml (setuptools >= 64) for a PEP 660 editable install. No dependency on a specific parent directory (e.g., /Users vs /Volumes). If you move or clone the repo elsewhere, just run `pip install -e .` again in the new location.
+
+Alternative (not recommended):
+
+```bash
 pip install -r requirements.txt
 ```
 
-## 2. Configure Environment
-# Copy example config
+## 2) Configure Environment
+
+Copy example config and set your keys:
+
+```bash
 cp .env.example .env
+```
 
-# Edit with your API key
+Required: Serper.dev API key (for search and scraping fallback)
 
-**Required:** Add your Serper.dev API key (for both search and scraping):
 ```bash
 SERPER_API_KEY=your_serper_api_key
 ```
 
-**Optional:** Configure search results per query (default: 10):
+Optional knobs:
+
 ```bash
-SEARCH_RESULTS_PER_QUERY=15  # Get 15 results per search query
+SEARCH_RESULTS_PER_QUERY=15   # Default: 10
+SEARCH_PROVIDER=TAVILY        # Free tier 1,000 req/mo (no key needed)
+TAVILY_API_KEY=your_tavily_api_key  # Optional for higher limits
 ```
 
-**Alternative:** Use Tavily's free tier (1,000 requests/month, no API key needed):
+## 3) Verify install
+
 ```bash
-SEARCH_PROVIDER=TAVILY
+python -c "import rsrch; from rsrch.stages import Scraper; print('OK')"
 ```
 
-**Optional:** For higher rate limits with Tavily:
+## 4) Run your first query
+
+Using the installed console script (preferred):
+
 ```bash
-TAVILY_API_KEY=your_tavily_api_key
-```
-## 3. Run Your First Query
+rsrch "What is the Anthropic Model Context Protocol?"
 ```
 
-## 4. Check Your Report
+Or with the module directly:
 
-{{ ... }}
+```bash
+python cli.py "What is the Anthropic Model Context Protocol?"
+```
+
+## 5) Check your report
+
+Reports are written to `./reports/` by default. The CLI prints the exact path on completion.
 
 ## Example Output
 
@@ -71,14 +94,10 @@ Report saved to: ./reports/report_20250130_143022.md
 
 ## Troubleshooting
 
-**Problem**: `ModuleNotFoundError: No module named 'openai'`
-**Solution**: Run `pip install -r requirements.txt`
-
-**Problem**: `ValueError: Required environment variable API_KEY is not set`
-**Solution**: Ensure your `.env` file exists and contains `API_KEY=your-key`
-
-**Problem**: Import errors
-**Solution**: Make sure you're in the `/Users/stwhite/CODE/rsrch` directory when running
+- ImportError after moving/cloning the repo: re-run `pip install -e .` in the new location
+- Using Anaconda/conda: ensure `which python` and `which pip` point to the same interpreter you used to install
+- Missing deps: `pip install -r requirements.txt`
+- Missing API keys: ensure `.env` exists and contains required keys
 
 ## Need Help?
 

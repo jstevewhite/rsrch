@@ -59,13 +59,24 @@ The pipeline consists of 10 stages:
 
 ## Installation
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
+Recommended: modern editable install (PEP 660) via pyproject.toml
 
-# Copy and configure environment
+```bash
+pip install -e .
 cp .env.example .env
-# Edit .env with your API keys
+```
+
+Notes:
+- Location independent: run from anywhere (no reliance on /Users vs /Volumes paths)
+- If you move or clone the repo elsewhere, just run `pip install -e .` again
+- Works with Anaconda/conda or venv; make sure `which python` and `which pip` match
+
+Alternative (basic deps only):
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env
+# Then run from project root (no console script installed)
 ```
 
 ## Configuration
@@ -135,6 +146,14 @@ MAX_ITERATIONS=2  # Maximum research iterations (1=no iteration, 2=one additiona
 ## Usage
 
 ### Basic Usage
+
+Preferred (installed console script):
+
+```bash
+rsrch "What is the latest research on tirzepatide?"
+```
+
+Alternative (direct module):
 
 ```bash
 python cli.py "What is the latest research on tirzepatide?"
@@ -282,8 +301,10 @@ The pipeline can perform multiple research iterations:
 
 ### Module Import Errors
 
-- Make sure you're running from the project root directory
-- Install all requirements: `pip install -r requirements.txt`
+- If you installed with `pip install -e .`, you can run from anywhere. If imports fail:
+  - Ensure you're using the same interpreter you used to install (`which python`, `which pip`)
+  - Reinstall: `pip uninstall -y rsrch || true && pip install -e .`
+- If you did not use the editable install, run from the project root or switch to the editable install above.
 
 ### Search/Scraping Issues
 
