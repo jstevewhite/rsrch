@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rsrch"
+version = "0.1.0"
+description = "Research pipeline for automated web research and reporting"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+  { name = "Your Name" }
+]
+dependencies = [
+  "openai",
+  "requests",
+  "beautifulsoup4",
+  "python-dotenv",
+  "pathlib",
+]
+
+[project.scripts]
+rsrch = "rsrch.cli:main"
+
+[tool.setuptools]
+# Flat layout: the project root is the "rsrch" package
+packages = ["rsrch", "rsrch.stages"]
+package-dir = { rsrch = "." }
