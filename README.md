@@ -29,14 +29,23 @@ Claim verification is in ... call it alpha. It has a great sensitivity to model 
 ## Features
 
 ✅ **Intent Classification**: Automatically identifies query type (informational, news, code, research, etc.)
+
 ✅ **Research Planning**: Creates structured plans with sections and search queries
+
 ✅ **Web Search Integration**: Searches the web using SERP API for current information
+
 ✅ **Content Scraping**: Extracts and processes web content with fallback strategies
+
 ✅ **Intelligent Summarization**: Generates summaries with citations using map-reduce
+
 ✅ **Context Assembly**: Builds context packages with vector similarity and reranking
+
 ✅ **Reflection & Iteration**: Validates completeness and performs additional research if needed
+
 ✅ **Claim Verification**: Optional fact-checking of report claims (experimental)
+
 ✅ **Configurable Models**: Use different LLMs for each stage via configuration
+
 ✅ **Report Generation**: Produces comprehensive Markdown reports with citations
 
 🚧 **Advanced Features**:
