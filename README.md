@@ -24,6 +24,12 @@ Reflection is in development. It will still fail a question every now and then -
 
 Claim verification is in ... call it alpha. It has a great sensitivity to model selection; sometimes you'll see a contested claim in the list and click on it and see that it just didn't get the reference. But I like getting the limitations and challenges at the end of the report, particularly since it's AI generated.
 
+## Requirements
+
+You'll need an OpenAI compatible endpoint. I use Openrouter because I get most of the current models to play with. I also use LiteLLM proxy, but again, any openai compatible endpoint should work. I do embedding locally using LMStudio, but you can use OpenAI or Ollama. 
+
+There's a BeautifulSoup scraper; if it fails, it tries Jina.ai, if that fails, it tries Serper's scraper. Jina.ai is the reranker used, but it's not too hard to change. I'm thinking about using a local embedding model and sorting by relevance score, but the Jina reranker is fast and cheap as chips. There's the option of Tavily search, but if you want to do a lot of research, I suggest just buying some credits at both endpoints. 
+
 **Source Code:** [https://github.com/jstevewhite/rsrch](https://github.com/jstevewhite/rsrch)
 
 ## Features
