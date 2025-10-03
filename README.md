@@ -8,7 +8,11 @@ This research pipeline is primarily 'vibe-coded' using Warp and Windsurf. (Some 
 
 Hallucination is low, but not zero. I have been using Gemini Pro to evaluate the reports, and mostly they're "Highly accurate and properly cited". I added my own verification stage; It makes for more searches and more scraping but it's enlightening to get a fact check at the end of the report. 
 
-It still sometimes refers to "Former President Trump" - most models have a cut-off date prior to the inaugeration. 
+It still sometimes refers to "Former President Trump" - most models have a cut-off date prior to the inaugeration. I'm thinking about moving each prompt to a config file so they can be tuned.
+
+There are some 'validation heuristics' that offer more significance to trusted sites than untrusted sites; I plan on excerpting that list into a config file so it's easy to update them. I'm considering trying to integrate with Ground News for partisan bias measures as well; maybe some other sites that rate accuracy, to figure into the confidence scoring. 
+
+**RESULTS ARE STOCHASTIC*** Web searches are not deterministic, and neither are LLMs. You can get different reports on different runs, but the facts *should* align. It's like assigning a report to 15 people and comparing them. This can be addressed; I could create report templates, But I like the design here, where a planner makes the outline. 
 
 ## Models
 
