@@ -10,30 +10,36 @@ pip install -r requirements.txt
 ```
 
 ## 2. Configure Environment
-
-```bash
 # Copy example config
 cp .env.example .env
 
 # Edit with your API key
-nano .env  # or use your favorite editor
-```
 
-Add your OpenAI API key:
-
+**Required:** Add your Serper.dev API key (for both search and scraping):
 ```bash
-API_KEY=sk-your-key-here
+SERPER_API_KEY=your_serper_api_key
 ```
 
+**Optional:** Configure search results per query (default: 10):
+```bash
+SEARCH_RESULTS_PER_QUERY=15  # Get 15 results per search query
+```
+
+**Alternative:** Use Tavily's free tier (1,000 requests/month, no API key needed):
+```bash
+SEARCH_PROVIDER=TAVILY
+```
+
+**Optional:** For higher rate limits with Tavily:
+```bash
+TAVILY_API_KEY=your_tavily_api_key
+```
 ## 3. Run Your First Query
-
-```bash
-python cli.py "What is the latest research on tirzepatide?"
 ```
 
 ## 4. Check Your Report
 
-Reports are saved in `./reports/` by default. Open the generated `.md` file to view your research report!
+{{ ... }}
 
 ## Example Output
 

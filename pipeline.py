@@ -55,7 +55,7 @@ class ResearchPipeline:
         )
         
         # Initialize researcher (web search)
-        self.researcher = Researcher()
+        self.researcher = Researcher(config)
         
         # Initialize scraper (content extraction)
         self.scraper = Scraper()

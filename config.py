@@ -30,7 +30,10 @@ class Config:
     report_model: str
     
     # Search Configuration
-    serp_api_key: Optional[str]
+    serper_api_key: Optional[str]  # Serper.dev API key (for both search and scraping)
+    search_provider: str  # SERP or TAVILY
+    tavily_api_key: Optional[str]  # Optional: enables higher rate limits
+    search_results_per_query: int  # Number of search results to request per query
     rerank_top_k_url: float  # Ratio of search results to scrape (Stage 4.5)
     rerank_top_k_sum: float  # Ratio of summaries to include in report (Stage 7)
     
@@ -98,15 +101,17 @@ class Config:
             reflection_model=get_optional("REFLECTION_MODEL", os.getenv("DEFAULT_MODEL", "gpt-4o")),
             report_model=get_optional("REPORT_MODEL", os.getenv("DEFAULT_MODEL", "gpt-4o")),
             
-            serp_api_key=os.getenv("SERP_API_KEY"),
-            rerank_top_k_url=float(get_optional("RERANK_TOP_K_URL", "0.25")),
-            rerank_top_k_sum=float(get_optional("RERANK_TOP_K_SUM", "0.25")),
+            serper_api_key=os.getenv("SERPER_API_KEY"),
+            search_provider=get_optional("SEARCH_PROVIDER", "SERP").upper(),
+            tavily_api_key=os.getenv("TAVILY_API_KEY"),
+            search_results_per_query=int(get_optional("SEARCH_RESULTS_PER_QUERY", "10")),
+            rerank_top_k_url=float(get_optional("RERANK_TOP_K_URL", "0.3")),
+            rerank_top_k_sum=float(get_optional("RERANK_TOP_K_SUM", "0.5")),
             
             vector_db_path=Path(get_optional("VECTOR_DB_PATH", "./research_db.sqlite")),
             embedding_model=get_optional("EMBEDDING_MODEL", "text-embedding-3-small"),
             embedding_url=get_optional("EMBEDDING_URL", os.getenv("API_ENDPOINT", "https://api.openai.com/v1")),
             embedding_api_key=os.getenv("EMBEDDING_API_KEY", os.getenv("API_KEY")),
-            
             reranker_url=os.getenv("RERANKER_URL"),
             reranker_model=os.getenv("RERANKER_MODEL"),
             reranker_api_key=os.getenv("RERANKER_API_KEY"),

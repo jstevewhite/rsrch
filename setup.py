@@ -1,13 +1,14 @@
 """Setup file for rsrch package."""
 
-from setuptools import setup, find_packages
+from setuptools import setup
 
 setup(
     name="rsrch",
     version="0.1.0",
     description="Research pipeline for automated web research and reporting",
     author="Your Name",
-    packages=find_packages(),
+    packages=["rsrch", "rsrch.stages"],
+    package_dir={"rsrch": "."},
     python_requires=">=3.8",
     install_requires=[
         "openai",

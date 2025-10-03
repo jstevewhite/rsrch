@@ -2,6 +2,24 @@
 
 A modular, configurable CLI tool for automated research report generation using LLMs.
 
+## Notes
+
+This research pipeline is primarily 'vibe-coded' using Warp and Windsurf. (Some recent articles suggest it's not vibe coding if you actually read and understand the code, so ... I have read and understand the code; make your own call :D) I wrote maybe ... 5-10% of the code. The design is mine, e.g. the pipeline layout, the steps, design decisions, etc. I've been iterating a research agent for some time, mostly for personal learning. The models involved have been primarily GPT5 and Claude Sonnet 4.5 - which produces the fewest errors so far. I use the zen MCP server with Gemini Pro 2.5 for codereview stuff, context7 for api currency, and perplexity for web search. 
+
+Hallucination is low, but not zero. I have been using Gemini Pro to evaluate the reports, and mostly they're "Highly accurate and properly cited". I added my own verification stage; It makes for more searches and more scraping but it's enlightening to get a fact check at the end of the report. 
+
+It still sometimes refers to "Former President Trump" - most models have a cut-off date prior to the inaugeration. 
+
+## Models
+
+I like the OSS models, but sometimes you gotta go frontier. I've had very good luck with gpt-oss-120b in most roles, and in the finalizer role I like qwen3-Max or Gemini 2.5 Pro. 
+
+You can actually use e.g. qwen3-30b-a3b-2507 for many tasks - it does a credible job of summarizing, for instance, but the performance I get from the cloud isn't that much different, and the gpt-oss-120b outperforms it in many of these tasks.
+
+Reflection is in development. It will still fail a question every now and then - ones that ChatGTP and Gemini both get right; I have to figure out how they're doing that. 
+
+Claim verification is in ... call it alpha. It has a great sensitivity to model selection; sometimes you'll see a contested claim in the list and click on it and see that it just didn't get the reference. But I like getting the limitations and challenges at the end of the report, particularly since it's AI generated.
+
 **Source Code:** [https://github.com/jstevewhite/rsrch](https://github.com/jstevewhite/rsrch)
 
 ## Features
@@ -57,38 +75,61 @@ Configure the pipeline via `.env` file:
 ```bash
 # API Configuration
 API_KEY=your_openai_api_key
-API_ENDPOINT=https://api.openai.com/v1
 DEFAULT_MODEL=gpt-4o-mini
 
 # Stage-Specific Models
 INTENT_MODEL=gpt-4o-mini
 PLANNER_MODEL=gpt-4o
-MRS_MODEL=gpt-4o-mini
+
+# Multi-Resource Summarizer (MRS) Model Configuration
+# Default model used when no content type is specified
+MRS_MODEL_DEFAULT=gpt-4o-mini
+
+# Content-Specific MRS Models (optional)
+# Uncomment and configure models for different content types:
+# MRS_MODEL_CODE=gpt-4o-mini        # For Stack Overflow, GitHub, code documentation
+# MRS_MODEL_RESEARCH=gpt-4o         # For arXiv, research papers, academic content
+# MRS_MODEL_NEWS=gpt-4o-mini        # For news articles, blogs, media
+# MRS_MODEL_DOCUMENTATION=gpt-4o    # For technical documentation
+# MRS_MODEL_GENERAL=gpt-4o-mini     # Fallback for general content
+
+# How content type detection works:
+# 1. URL heuristics check domain patterns (arxiv.org -> research, github.com -> code)
+# 2. Falls back to MRS_MODEL_DEFAULT if no content-specific model is configured
+# 3. Uses MRS_MODEL_GENERAL if configured, otherwise MRS_MODEL_DEFAULT
+
 CONTEXT_MODEL=gpt-4o-mini
 REFLECTION_MODEL=gpt-4o
 REPORT_MODEL=gpt-4o
-VERIFY_MODEL=gpt-4o
 
-# Search Configuration
-SERP_API_KEY=your_serp_api_key
-RERANK_TOP_K=0.25
-
-# Scraping Fallback (optional - for JS-heavy sites)
-SERPER_API_KEY=your_serper_api_key
-JINA_API_KEY=your_jina_api_key
+# Search Configuration (Serper.dev provides both search and scraping)
+SERPER_API_KEY=your_serper_api_key  # Required for web search and scraping fallback
+SEARCH_PROVIDER=SERP  # Options: SERP, TAVILY
+TAVILY_API_KEY=your_tavily_api_key  # Optional: enables higher rate limits
+SEARCH_RESULTS_PER_QUERY=10  # Number of search results to request per query (5-20 recommended)
+RERANK_TOP_K_URL=0.3   # Ratio of search results to scrape (0.0-1.0)
+RERANK_TOP_K_SUM=0.5   # Ratio of summaries to include in report (0.0-1.0)
 
 # Vector Database Configuration
 VECTOR_DB_PATH=./research_db.sqlite
 EMBEDDING_MODEL=text-embedding-3-small
 
+# Reranker Configuration (optional)
+# RERANKER_URL=https://api.jina.ai/v1/rerank
+# RERANKER_MODEL=jina-reranker-v2-base-multilingual
+# RERANKER_API_KEY=your_reranker_api_key
+# USE_RERANKER=true
+
+# Verification Configuration (Optional - adds ~30-60s and ~$0.04-0.05 per report)
+# VERIFY_CLAIMS=true  # Enable claim verification stage
+# VERIFY_MODEL=gpt-4o-mini  # Model for verification (cheap is fine)
+# VERIFY_CONFIDENCE_THRESHOLD=0.7  # Flag claims below this confidence
+
 # Output Configuration
 OUTPUT_DIR=./reports
 LOG_LEVEL=INFO
-
-# Research Configuration
-MAX_ITERATIONS=3
-VERIFY_CLAIMS=false
-VERIFY_CONFIDENCE_THRESHOLD=0.7
+REPORT_MAX_TOKENS=4000  # Default: ~3000 words
+MAX_ITERATIONS=2  # Maximum research iterations (1=no iteration, 2=one additional iteration)
 ```
 
 ## Usage
@@ -223,24 +264,10 @@ MRS_MODEL=gpt-4o-mini
 CONTEXT_MODEL=gpt-4o-mini
 
 # More capable models for complex reasoning
-PLANNER_MODEL=gpt-4o
-REFLECTION_MODEL=gpt-4o
-REPORT_MODEL=gpt-4o
-```
-
-### Scraping Strategy
-
-The scraper uses a three-tier fallback approach:
-
-1. **BeautifulSoup** (free) - Fast, lightweight HTML parsing
-2. **Jina.ai** (paid) - Handles JavaScript and complex layouts
-3. **Serper** (paid) - Professional scraping service
 
 ### Research Iteration
 
 The pipeline can perform multiple research iterations:
-
-- **Reflection** identifies information gaps
 - **Additional queries** are generated to fill gaps
 - **Maximum iterations** configurable (default: 3)
 - **Stops early** if research is deemed complete
@@ -260,7 +287,7 @@ The pipeline can perform multiple research iterations:
 
 ### Search/Scraping Issues
 
-- Verify `SERP_API_KEY` for web search functionality
+- Verify `SERPER_API_KEY` for web search functionality
 - Optional: Configure `SERPER_API_KEY` or `JINA_API_KEY` for fallback scraping
 - Check `research_pipeline.log` for detailed error messages
 
@@ -276,15 +303,42 @@ This is an active development project. Key areas for contribution:
 
 1. **Model Providers**: Add support for additional LLM providers (Anthropic, etc.)
 2. **Search Sources**: Integrate additional search APIs or RSS feeds
-3. **Scraping Strategies**: Improve content extraction for specific site types
-4. **Verification**: Enhance claim verification accuracy and coverage
-5. **UI/UX**: Create web interface or API endpoints
+3. **Scraping Strategy**
+
+The scraper uses a three-tier fallback approach:
+1. **BeautifulSoup** (free) - Fast, lightweight HTML parsing
+2. **Jina.ai** (paid) - Handles JavaScript and complex layouts
+3. **Serper** (paid) - Professional scraping service
+
+**Search Provider Selection**
+
+Choose your preferred search API provider:
+
+```bash
+# Use SERP API (default - requires SERPER_API_KEY)
+SEARCH_PROVIDER=SERP
+
+# Use Tavily API (free tier: 1,000 requests/month, no API key needed)
+SEARCH_PROVIDER=TAVILY
+```
+
+**SERP API (Default):**
+- Requires `SERPER_API_KEY` configuration
+- Higher quality results, more reliable
+- Best for production use
+
+**Tavily API (Free Alternative):**
+- 1,000 free requests per month (no API key needed)
+- Optional: Provide `TAVILY_API_KEY` for higher rate limits and advanced features
+- Good fallback option when SERPER API is unavailable
+
+The pipeline will automatically use your chosen provider for all web searches.points
 6. **Testing**: Unit and integration tests
 7. **Performance**: Optimize vector operations and caching
 
 ## License
 
-MIT
+{{ ... }}
 
 ## Credits
 
