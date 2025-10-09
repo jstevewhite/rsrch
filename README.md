@@ -14,6 +14,8 @@ There are some 'validation heuristics' that offer more significance to trusted s
 
 **RESULTS ARE STOCHASTIC*** Web searches are not deterministic, and neither are LLMs. You can get different reports on different runs, but the facts *should* align. It's like assigning a report to 15 people and comparing them. This can be addressed; I could create report templates, But I like the design here, where a planner makes the outline. 
 
+**VERIFICATION STEP IS ASPIRATIONAL** Thus far it flags things that are ... more or less correct. Sometimes it's because the report writer combined information and cited one source. So read and understand what it's complaining about. Sometimes it's good - they are terrible at math, so it will say "23 items in this table" when there are 21, and then flag it as wrong because there are 19 (a real example where the table had 21 items.) The moral of the story is that when you have validation turned off you'll see a lot of false negatives.
+
 ## Models
 
 I like the OSS models, but sometimes you gotta go frontier. I've had very good luck with gpt-oss-120b in most roles, and in the finalizer role I like qwen3-Max or Gemini 2.5 Pro. 
