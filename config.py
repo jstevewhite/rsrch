@@ -66,6 +66,16 @@ class Config:
     log_level: str
     report_max_tokens: int
     
+    # Rendering/Extraction Flags
+    output_format: str  # e.g., "markdown" (affects scraper output preference)
+    preserve_tables: bool  # if true, attempt to preserve/emit tables in scraped content
+    
+    # Summarizer table handling (configurable via env)
+    summarizer_enable_table_aware: bool
+    summarizer_table_topk_rows: int
+    summarizer_table_max_rows_verbatim: int
+    summarizer_table_max_cols_verbatim: int
+    
     @classmethod
     def from_env(cls, env_file: Optional[str] = None) -> "Config":
         """Load configuration from environment variables."""
@@ -130,6 +140,16 @@ class Config:
             output_dir=Path(get_optional("OUTPUT_DIR", "./reports")),
             log_level=get_optional("LOG_LEVEL", "INFO"),
             report_max_tokens=int(get_optional("REPORT_MAX_TOKENS", "4000")),
+            
+            # New flags
+            output_format=get_optional("OUTPUT_FORMAT", "markdown").lower(),
+            preserve_tables=get_optional("PRESERVE_TABLES", "true").lower() in ("true", "1", "yes"),
+            
+            # Summarizer table handling
+            summarizer_enable_table_aware=get_optional("ENABLE_TABLE_AWARE", "true").lower() in ("true", "1", "yes"),
+            summarizer_table_topk_rows=int(get_optional("TABLE_TOPK_ROWS", "10")),
+            summarizer_table_max_rows_verbatim=int(get_optional("TABLE_MAX_ROWS_VERBATIM", "15")),
+            summarizer_table_max_cols_verbatim=int(get_optional("TABLE_MAX_COLS_VERBATIM", "8")),
         )
     
     def get_mrs_model_for_content_type(self, content_type: str) -> str:

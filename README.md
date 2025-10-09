@@ -36,6 +36,12 @@ There's a BeautifulSoup scraper; if it fails, it tries Jina.ai, if that fails, i
 
 ✅ **Intent Classification**: Automatically identifies query type (informational, news, code, research, etc.)
 
+✅ **Markdown-first Scraping (new)**: Primary scraper now emits full-page Markdown with preserved tables when `OUTPUT_FORMAT=markdown` and `PRESERVE_TABLES=true`
+
+✅ **Table-aware Summarization (new)**: Small tables are preserved verbatim; large tables are compacted deterministically (header + top-K salient rows + Python-computed aggregates) with configurable thresholds
+
+✅ **Report Table Handling (new)**: Final report includes Markdown tables verbatim and compacted tables as-is with their note lines; will create a short "Tables" subsection or appendix if needed
+
 ✅ **Research Planning**: Creates structured plans with sections and search queries
 
 ✅ **Web Search Integration**: Searches the web using SERP API for current information
@@ -163,6 +169,16 @@ OUTPUT_DIR=./reports
 LOG_LEVEL=INFO
 REPORT_MAX_TOKENS=4000  # Default: ~3000 words
 MAX_ITERATIONS=2  # Maximum research iterations (1=no iteration, 2=one additional iteration)
+
+# Scraper output and table preservation (new)
+OUTPUT_FORMAT=markdown      # Emit Markdown from primary scraper
+PRESERVE_TABLES=true        # Convert HTML tables to Markdown inline
+
+# Summarizer table handling (new)
+ENABLE_TABLE_AWARE=true     # Enable table-aware preprocessing
+TABLE_TOPK_ROWS=10          # Rows to keep for large tables (set higher for more)
+TABLE_MAX_ROWS_VERBATIM=15  # Preserve small tables at or below this row count
+TABLE_MAX_COLS_VERBATIM=8   # Preserve small tables at or below this column count
 ```
 
 ## Usage
@@ -254,6 +270,17 @@ rsrch/
 
 Reports are saved as Markdown files in the configured output directory (default: `./reports/`).
 
+### Table Handling (new)
+- Scraper emits Markdown and preserves HTML tables as pipe tables when enabled.
+- Summarizer preserves small tables verbatim. For large tables, it compacts deterministically:
+  - header retained
+  - top-K salient rows (by numeric target column or combined numeric score)
+  - aggregates computed outside the LLM (mean/max) and added as a note line
+- Report generator is instructed to:
+  - include Markdown tables verbatim in relevant sections
+  - include compacted tables as-is with their note lines
+  - if a table doesn’t fit naturally inline, place it in a short “Tables” subsection or an appendix
+
 Example output file: `report_20250130_143022.md`
 
 Each report includes:
@@ -331,6 +358,15 @@ The pipeline can perform multiple research iterations:
 ### Search/Scraping Issues
 
 - Verify `SERPER_API_KEY` for web search functionality
+- To preserve tables and emit Markdown from the primary scraper, ensure:
+  - `OUTPUT_FORMAT=markdown`
+  - `PRESERVE_TABLES=true`
+
+### Table Summarization Issues
+- If you see only 10 rows in compacted tables, ensure the environment variables are wired and set:
+  - `ENABLE_TABLE_AWARE=true`
+  - `TABLE_TOPK_ROWS` set to desired number (e.g., 100)
+- The pipeline now reads these from `.env` and passes them into the summarizer.
 - Optional: Configure `SERPER_API_KEY` or `JINA_API_KEY` for fallback scraping
 - Check `research_pipeline.log` for detailed error messages
 

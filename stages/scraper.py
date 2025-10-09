@@ -1,10 +1,11 @@
 """Content scraping stage - extracts content from URLs."""
 
 import logging
+import re
 import requests
 from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from ..models import SearchResult, ScrapedContent
 
 logger = logging.getLogger(__name__)
@@ -22,14 +23,18 @@ class Scraper:
     # User agent to avoid basic bot detection
     USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
     
-    def __init__(self, max_workers: int = 5):
+    def __init__(self, max_workers: int = 5, output_format: str = "markdown", preserve_tables: bool = True):
         """Initialize the scraper.
         
         Args:
             max_workers: Maximum number of parallel scraping threads (default: 5)
+            output_format: Preferred output format (e.g., 'markdown')
+            preserve_tables: If True, attempt to preserve/emit tables in content
         """
         self.use_fallback_count = 0
         self.max_workers = max_workers
+        self.output_format = (output_format or "").lower() or "markdown"
+        self.preserve_tables = bool(preserve_tables)
     
     def scrape_url(self, url: str, use_fallback: bool = True) -> Optional[ScrapedContent]:
         """
@@ -213,7 +218,7 @@ class Scraper:
             timeout: Request timeout in seconds
             
         Returns:
-            Cleaned text content or None if failed
+            Cleaned text (Markdown if configured) or None if failed
             
         Raises:
             Exception if request fails
@@ -235,7 +240,17 @@ class Scraper:
             for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
                 tag.decompose()
             
-            # Extract text
+            # If we want Markdown output, convert entire DOM to Markdown
+            if self.output_format == 'markdown':
+                if self.preserve_tables:
+                    try:
+                        self._replace_tables_with_markdown(soup)
+                    except Exception as e:
+                        logger.debug(f"Table to Markdown conversion skipped due to error: {e}")
+                md = self._html_to_markdown(soup)
+                return md
+            
+            # Otherwise, extract plain text
             text = soup.get_text(separator='\n', strip=True)
             
             # Clean up whitespace
@@ -370,7 +385,7 @@ class Scraper:
         
         Args:
             url: Source URL
-            content: Scraped content (text)
+            content: Scraped content (text/markdown)
             scraper: Which scraper was used ('beautifulsoup' or 'get_url')
             
         Returns:
@@ -378,8 +393,8 @@ class Scraper:
         """
         from datetime import datetime
         
-        # Extract title from first line or URL
-        lines = content.split('\n')
+        # Extract title from first non-empty line or URL
+        lines = [ln for ln in content.split('\n') if ln.strip()]
         title = lines[0][:100] if lines else url
         
         # TODO: Implement proper chunking
@@ -394,7 +409,9 @@ class Scraper:
             metadata={
                 "scraper_used": scraper,
                 "content_length": len(content),
-                "chunk_count": len(chunks)
+                "chunk_count": len(chunks),
+                "output_format": self.output_format,
+                "preserve_tables": self.preserve_tables,
             },
             retrieved_at=datetime.now()
         )
@@ -411,3 +428,159 @@ class Scraper:
             "fallback_used": self.use_fallback_count,
             "estimated_cost": self.use_fallback_count * 0.005  # Approximate cost per scrape
         }
+    
+    # --- Internal helpers for table preservation ---
+    def _replace_tables_with_markdown(self, soup: BeautifulSoup) -> None:
+        """Replace all HTML <table> tags in the soup with Markdown table strings.
+        Best-effort: handles simple tables without complex rowspan/colspan.
+        """
+        tables = soup.find_all('table')
+        if not tables:
+            return
+        for tbl in tables:
+            md = self._html_table_to_markdown(tbl)
+            tbl.replace_with(NavigableString(md))
+    
+    def _html_table_to_markdown(self, table_tag) -> str:
+        """Convert a BeautifulSoup <table> tag to a Markdown pipe table string.
+        Limitations: minimal support for colspan/rowspan (ignored), nested tables treated as text.
+        """
+        def sanitize_cell(txt: str) -> str:
+            if txt is None:
+                return ""
+            # Collapse whitespace, escape pipes, strip newlines
+            s = ' '.join(txt.split())
+            s = s.replace('|', '\\|')
+            return s
+        
+        rows = table_tag.find_all('tr')
+        if not rows:
+            return "\n\n"  # empty placeholder
+        
+        # Determine header
+        header_cells = []
+        # Prefer thead > tr > th if present
+        thead = table_tag.find('thead')
+        if thead:
+            ths = thead.find_all('th')
+            header_cells = [sanitize_cell(th.get_text(strip=True)) for th in ths]
+        if not header_cells and rows:
+            # Fallback to first row's th/td
+            first = rows[0]
+            ths = first.find_all(['th', 'td'])
+            header_cells = [sanitize_cell(th.get_text(strip=True)) for th in ths]
+            # Remove first row from body if we used it as header
+            rows = rows[1:]
+        
+        col_count = max(1, len(header_cells))
+        header_line = "| " + " | ".join(header_cells) + " |"
+        sep_line = "| " + " | ".join(["---"] * col_count) + " |"
+        
+        body_lines = []
+        for tr in rows:
+            tds = tr.find_all(['td', 'th'])
+            cells = [sanitize_cell(td.get_text(strip=True)) for td in tds]
+            # Normalize cell count
+            if len(cells) < col_count:
+                cells.extend([""] * (col_count - len(cells)))
+            elif len(cells) > col_count:
+                cells = cells[:col_count]
+            body_lines.append("| " + " | ".join(cells) + " |")
+        
+        md = "\n\n" + "\n".join([header_line, sep_line] + body_lines) + "\n\n"
+        return md
+    
+    def _html_to_markdown(self, soup: BeautifulSoup) -> str:
+        """Convert a BeautifulSoup DOM to Markdown (best-effort).
+        Supports: headings, paragraphs, lists, links, code/pre, blockquotes, images, hr, and tables (pre-converted).
+        """
+        def node_to_md(node, list_depth=0, ordered=False, index=1):
+            # Navigable text or pre-converted Markdown (e.g., tables)
+            if isinstance(node, NavigableString):
+                return str(node)
+            if not hasattr(node, 'name'):
+                return ''
+            name = node.name.lower()
+            # Gather child content
+            def children_md():
+                parts = []
+                child_index = 1
+                for child in node.children:
+                    parts.append(node_to_md(child, list_depth=list_depth, ordered=ordered, index=child_index))
+                    if ordered:
+                        child_index += 1
+                return ''.join(parts)
+            
+            if name in ['style', 'script', 'nav', 'footer', 'header', 'aside']:
+                return ''
+            if name in ['h1','h2','h3','h4','h5','h6']:
+                level = int(name[1])
+                return f"\n\n{'#'*level} {children_md().strip()}\n\n"
+            if name in ['p']:
+                return f"\n\n{children_md().strip()}\n\n"
+            if name == 'br':
+                return "\n"
+            if name == 'a':
+                href = node.get('href') or ''
+                text = children_md() or (node.get_text(strip=True) if node else '')
+                if href:
+                    return f"[{text}]({href})"
+                return text
+            if name in ['strong','b']:
+                return f"**{children_md().strip()}**"
+            if name in ['em','i']:
+                return f"*{children_md().strip()}*"
+            if name == 'code':
+                # Inline code unless inside pre
+                if node.parent and node.parent.name and node.parent.name.lower() == 'pre':
+                    return children_md()
+                return f"`{children_md().strip()}`"
+            if name == 'pre':
+                # Preserve code blocks
+                text = node.get_text('\n')
+                return f"\n\n```\n{text.strip()}\n```\n\n"
+            if name == 'blockquote':
+                content = children_md().strip()
+                quoted = '\n'.join([f"> {ln}" if ln.strip() else '>' for ln in content.splitlines()])
+                return f"\n\n{quoted}\n\n"
+            if name == 'hr':
+                return "\n\n---\n\n"
+            if name == 'img':
+                alt = node.get('alt') or ''
+                src = node.get('src') or ''
+                return f"![{alt}]({src})"
+            if name in ['ul','ol']:
+                items = []
+                for idx, li in enumerate(node.find_all('li', recursive=False), start=1):
+                    li_text = node_to_md(li, list_depth=list_depth+1, ordered=(name=='ol'), index=idx)
+                    items.append(li_text)
+                return "".join(items) + ("\n" if items else '')
+            if name == 'li':
+                prefix = (f"{index}. " if ordered else "- ")
+                content = ''.join(node_to_md(child, list_depth=list_depth, ordered=ordered) for child in node.children)
+                # Indentation for nested lists
+                indent = '  ' * max(0, list_depth-1)
+                lines = [ln for ln in content.strip().splitlines() if ln.strip()]
+                if not lines:
+                    return ''
+                first = f"{indent}{prefix}{lines[0]}\n"
+                rest = ''.join(f"{indent}  {ln}\n" for ln in lines[1:])
+                return first + rest
+            if name in ['table']:
+                # Should already be replaced by Markdown string; fallback to text
+                return "\n\n" + node.get_text(" ", strip=True) + "\n\n"
+            if name in ['tr','td','th','thead','tbody','tfoot']:
+                # Should not occur if table replaced; ignore/flatten
+                return node.get_text(" ", strip=True)
+            # Generic container
+            return children_md()
+        
+        # Prefer body if present
+        root = soup.body if hasattr(soup, 'body') and soup.body else soup
+        md = node_to_md(root)
+        # Normalize excessive blank lines
+        md = re.sub(r"\n{3,}", "\n\n", md)
+        # Trim trailing spaces on lines
+        md = "\n".join(line.rstrip() for line in md.splitlines())
+        md = md.strip() + "\n"
+        return md

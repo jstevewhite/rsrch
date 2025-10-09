@@ -1,6 +1,7 @@
 """Summarization stage - generates summaries with citations from scraped content."""
 
 import logging
+import re
 from typing import List, Dict, Optional, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -40,11 +41,22 @@ class Summarizer:
     # Direct summarization threshold (no chunking needed)
     DIRECT_SUMMARIZATION_CHARS = 50000  # ~12,500 tokens
     
+    # Table-aware preprocessing settings
+    ENABLE_TABLE_AWARE = True
+    TABLE_MAX_ROWS_VERBATIM = 15
+    TABLE_MAX_COLS_VERBATIM = 8
+    TABLE_TOPK_ROWS = 10
+    
     def __init__(
         self, 
         llm_client: LLMClient, 
         default_model: str = "gpt-4o-mini",
-        model_selector: Optional[Callable[[str], str]] = None
+        model_selector: Optional[Callable[[str], str]] = None,
+        *,
+        enable_table_aware: Optional[bool] = None,
+        table_topk_rows: Optional[int] = None,
+        table_max_rows_verbatim: Optional[int] = None,
+        table_max_cols_verbatim: Optional[int] = None,
     ):
         """
         Initialize the summarizer.
@@ -57,7 +69,15 @@ class Summarizer:
         self.llm_client = llm_client
         self.default_model = default_model
         self.model_selector = model_selector
-        logger.info(f"Summarizer initialized with default model: {default_model}")
+        # Instance-level table settings (override class defaults if provided)
+        self.enable_table_aware = self.ENABLE_TABLE_AWARE if enable_table_aware is None else bool(enable_table_aware)
+        self.table_topk_rows = self.TABLE_TOPK_ROWS if table_topk_rows is None else int(table_topk_rows)
+        self.table_max_rows_verbatim = self.TABLE_MAX_ROWS_VERBATIM if table_max_rows_verbatim is None else int(table_max_rows_verbatim)
+        self.table_max_cols_verbatim = self.TABLE_MAX_COLS_VERBATIM if table_max_cols_verbatim is None else int(table_max_cols_verbatim)
+        logger.info(
+            f"Summarizer initialized with default model: {default_model} "
+            f"(tables: aware={self.enable_table_aware}, topk={self.table_topk_rows}, small<={self.table_max_rows_verbatim}x{self.table_max_cols_verbatim})"
+        )
     
     def _select_model(self, url: str) -> str:
         """Select the appropriate model based on URL content type.
@@ -218,8 +238,10 @@ REMEMBER: The source material reflects REALITY. Your training data reflects THE 
         Returns:
             Summary object with citations
         """
+        # Preprocess content to preserve/compact tables
+        text_pre = self._preprocess_for_tables(content.content, plan.query.text) if self.enable_table_aware else content.content
         prompt = self._build_summary_prompt(
-            text=content.content,
+            text=text_pre,
             url=content.url,
             title=content.title,
             query=plan.query.text,
@@ -388,6 +410,231 @@ REMEMBER: The source material reflects REALITY. Your training data reflects THE 
         logger.info(f"Created {len(chunks)} chunks (sizes: {[f'{len(c):,}' for c in chunks[:5]]}{'...' if len(chunks) > 5 else ''})")
         return chunks
     
+    # ===== Table-aware preprocessing helpers =====
+    def _preprocess_for_tables(self, text: str, query: str) -> str:
+        """Detect Markdown tables in text and preserve or compress them.
+        Small tables are kept verbatim; large tables are compacted deterministically.
+        """
+        try:
+            tables = self._find_markdown_tables(text)
+            if not tables:
+                return text
+            # Build new text by replacing from the end to keep indices stable
+            new_text = text
+            offset = 0
+            for tbl in tables:
+                start, end = tbl['start'], tbl['end']
+                md_table = text[start:end]
+                info = self._analyze_table(md_table)
+                if info['rows'] <= self.table_max_rows_verbatim and info['cols'] <= self.table_max_cols_verbatim:
+                    replacement = md_table  # keep verbatim
+                else:
+                    # Choose salient rows
+                    top_indices, criterion = self._select_salient_rows(info, self.table_topk_rows, query)
+                    # Compute aggregates
+                    aggs = self._compute_column_aggregates(info)
+                    replacement = self._compress_markdown_table(info, top_indices, criterion, aggs)
+                # Apply replacement considering prior offset
+                adj_start = start + offset
+                adj_end = end + offset
+                new_text = new_text[:adj_start] + replacement + new_text[adj_end:]
+                offset += len(replacement) - (end - start)
+            return new_text
+        except Exception as e:
+            logger.debug(f"Table preprocessing failed, returning original text: {e}")
+            return text
+    
+    def _find_markdown_tables(self, text: str) -> List[Dict]:
+        """Locate pipe-style Markdown tables and return their spans.
+        Strategy: line-scan for header line with pipes followed by a separator line of --- cells.
+        """
+        lines = text.split('\n')
+        indices = []
+        i = 0
+        pos = 0  # char offset tracker
+        while i < len(lines) - 1:
+            line = lines[i]
+            next_line = lines[i+1]
+            # Quick checks: must contain at least two pipes and a separator line next
+            if line.count('|') >= 2 and self._is_md_table_sep(next_line):
+                # collect table block lines until empty line or non-table-looking line
+                start_char = pos
+                j = i + 2
+                while j < len(lines) and lines[j].count('|') >= 2 and lines[j].strip():
+                    j += 1
+                end_char = pos + sum(len(l)+1 for l in lines[i:j])  # include newlines
+                # Ensure header row has at least one cell
+                if '|' in line:
+                    indices.append({'start': start_char, 'end': end_char, 'line_start': i, 'line_end': j})
+                i = j
+                pos = end_char
+                continue
+            # advance
+            pos += len(line) + 1
+            i += 1
+        return indices
+    
+    @staticmethod
+    def _is_md_table_sep(line: str) -> bool:
+        # A separator line looks like: | --- | :---: | ---: |
+        segs = [seg.strip() for seg in line.strip().strip('|').split('|')]
+        if len(segs) < 1:
+            return False
+        for seg in segs:
+            if not seg:
+                return False
+            # Allow :, -, and spaces only; must include at least three hyphens
+            if not all(c in ':- ' for c in seg):
+                return False
+            if seg.count('-') < 3:
+                return False
+        return True
+    
+    def _analyze_table(self, md_table: str) -> Dict:
+        """Parse a Markdown pipe table into headers/rows and compute basic typing and numeric values."""
+        lines = [ln for ln in md_table.strip().split('\n') if ln.strip()]
+        if len(lines) < 2:
+            return {'headers': [], 'rows': 0, 'cols': 0, 'cells': [], 'numeric_cols': []}
+        header_cells = [c.strip() for c in lines[0].strip().strip('|').split('|')]
+        body_lines = lines[2:] if self._is_md_table_sep(lines[1]) else lines[1:]
+        rows = []
+        num_pattern = re.compile(r"^-?\d+(?:[\.,]\d+)?%?$")
+        for bl in body_lines:
+            cells = [c.strip() for c in bl.strip().strip('|').split('|')]
+            # normalize width
+            if len(cells) < len(header_cells):
+                cells.extend([''] * (len(header_cells) - len(cells)))
+            elif len(cells) > len(header_cells):
+                cells = cells[:len(header_cells)]
+            rows.append(cells)
+        cols = len(header_cells)
+        # Determine numeric columns
+        numeric_cols = []
+        for ci in range(cols):
+            col_vals = [rows[ri][ci] for ri in range(len(rows)) if ri < len(rows)]
+            # normalize comma decimal
+            parsed = []
+            for v in col_vals:
+                vv = v.replace(',', '')
+                if num_pattern.match(vv):
+                    try:
+                        val = float(vv.rstrip('%'))
+                        if v.endswith('%'):
+                            val = val  # keep raw percent value
+                        parsed.append(val)
+                    except Exception:
+                        pass
+            density = (len(parsed) / max(1, len(col_vals)))
+            numeric_cols.append(density >= 0.6)
+        return {
+            'headers': header_cells,
+            'cells': rows,
+            'rows': len(rows),
+            'cols': cols,
+            'numeric_cols': numeric_cols,
+        }
+    
+    def _select_salient_rows(self, info: Dict, k: int, query: str) -> (List[int], str):
+        """Select up to k salient rows. Prefer a target metric column based on header keywords; else use sum across numeric cols."""
+        headers = [h.lower() for h in info['headers']]
+        numeric_cols = info['numeric_cols']
+        target_keywords = ['accuracy', 'f1', 'f1-score', 'auc', 'roc', 'revenue', 'cost', 'price', 'score', 'latency']
+        target_col = None
+        for idx, h in enumerate(headers):
+            if numeric_cols[idx] and any(kw in h for kw in target_keywords):
+                target_col = idx
+                break
+        # If query mentions a header
+        if target_col is None and query:
+            for idx, h in enumerate(headers):
+                if numeric_cols[idx] and h in query.lower():
+                    target_col = idx
+                    break
+        rows = info['cells']
+        # Parse numeric values for selection
+        def parse_float(s: str) -> float:
+            s2 = s.replace(',', '')
+            s2 = s2.rstrip('%')
+            try:
+                return float(s2)
+            except Exception:
+                return float('-inf')
+        if target_col is not None:
+            scored = [(ri, parse_float(rows[ri][target_col])) for ri in range(len(rows))]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            top = [ri for ri, _ in scored if _ != float('-inf')][:k]
+            criterion = f"max by {info['headers'][target_col]}"
+            if not top:
+                # fallback
+                target_col = None
+        if target_col is None:
+            # Sum across numeric columns
+            num_indices = [i for i, is_num in enumerate(numeric_cols) if is_num]
+            scored = []
+            for ri in range(len(rows)):
+                total = 0.0
+                for ci in num_indices:
+                    val = parse_float(rows[ri][ci])
+                    total += 0 if val == float('-inf') else val
+                scored.append((ri, total))
+            scored.sort(key=lambda x: x[1], reverse=True)
+            top = [ri for ri, _ in scored][:k]
+            criterion = "top by combined numeric values"
+        return top, criterion
+    
+    def _compute_column_aggregates(self, info: Dict) -> Dict:
+        """Compute min/max/mean for numeric columns and top categories for non-numeric."""
+        from collections import Counter
+        rows = info['cells']
+        cols = info['cols']
+        aggs = {}
+        for ci in range(cols):
+            col_name = info['headers'][ci]
+            if info['numeric_cols'][ci]:
+                vals = []
+                for r in rows:
+                    try:
+                        v = float(r[ci].replace(',', '').rstrip('%'))
+                        vals.append(v)
+                    except Exception:
+                        pass
+                if vals:
+                    aggs[col_name] = {
+                        'min': min(vals),
+                        'mean': (sum(vals)/len(vals)) if vals else None,
+                        'max': max(vals),
+                    }
+            else:
+                from collections import Counter
+                ctr = Counter([r[ci] for r in rows if r[ci]])
+                aggs[col_name] = {
+                    'top': ctr.most_common(3)
+                }
+        return aggs
+    
+    def _compress_markdown_table(self, info: Dict, top_indices: List[int], criterion: str, aggs: Dict) -> str:
+        """Emit a compact Markdown table with header + selected rows and a notes line about selection and aggregates."""
+        headers = info['headers']
+        body = info['cells']
+        # Build table
+        header_line = "| " + " | ".join(headers) + " |"
+        sep_line = "| " + " | ".join(["---"] * len(headers)) + " |"
+        sel_rows = [body[i] for i in top_indices]
+        body_lines = ["| " + " | ".join(r) + " |" for r in sel_rows]
+        # Build aggregates summary (numeric only)
+        agg_parts = []
+        for col, a in aggs.items():
+            if 'min' in a:
+                def fmt(x):
+                    try:
+                        return f"{x:.4g}"
+                    except Exception:
+                        return str(x)
+                agg_parts.append(f"{col} mean={fmt(a['mean'])}, max={fmt(a['max'])}")
+        agg_str = ", ".join(agg_parts) if agg_parts else "none"
+        notes = f"\n\n> Note: Showing {len(sel_rows)} of {info['rows']} rows; selection={criterion}; aggregates: {agg_str}.\n\n"
+        return "\n\n" + "\n".join([header_line, sep_line] + body_lines) + notes
+    
     def _summarize_chunk(
         self,
         chunk: str,
@@ -420,6 +667,9 @@ REMEMBER: The source material reflects REALITY. Your training data reflects THE 
         
         source_grounding = self._get_source_grounding_context()
         
+        # Preprocess chunk for tables
+        processed_chunk = self._preprocess_for_tables(chunk, query) if self.enable_table_aware else chunk
+        
         prompt = f"""{source_grounding}
 
 ---
@@ -433,7 +683,12 @@ URL: {url}
 Chunk {chunk_id + 1}
 
 Content:
-{chunk}
+{processed_chunk}
+
+Table handling:
+- Preserve any Markdown tables verbatim as they appear.
+- If a compacted table is present, use it as-is; do not recompute totals or statistics.
+- Do not reformat tables.
 
 Provide a concise summary focusing on information relevant to the research query.
 Extract key facts, findings, and insights. Maintain temporal accuracy. Aim for 2-3 paragraphs."""
@@ -507,6 +762,11 @@ Create a comprehensive summary that:
 2. Organizes information logically
 3. Highlights key findings relevant to the research query
 4. Maintains factual accuracy and temporal correctness
+
+Table handling:
+- Preserve any Markdown tables verbatim as they appear.
+- If a compacted table is present, use it as-is; do not recompute totals or statistics.
+- Do not reformat tables.
 
 Aim for 3-5 paragraphs."""
 
@@ -584,6 +844,11 @@ Provide a comprehensive summary that:
 2. Identifies main findings, arguments, or insights
 3. Maintains factual accuracy and temporal correctness
 4. Organizes information clearly
+
+Table handling:
+- Preserve any Markdown tables verbatim as they appear.
+- If a compacted table is present, use it as-is; do not recompute totals or statistics.
+- Do not reformat tables.
 
 Aim for 3-5 paragraphs. Focus on substance over style."""
     

@@ -58,13 +58,20 @@ class ResearchPipeline:
         self.researcher = Researcher(config)
         
         # Initialize scraper (content extraction)
-        self.scraper = Scraper()
+        self.scraper = Scraper(
+            output_format=config.output_format,
+            preserve_tables=config.preserve_tables,
+        )
         
         # Initialize summarizer with model selector
         self.summarizer = Summarizer(
             llm_client=self.llm_client,
             default_model=config.mrs_model_default,
             model_selector=config.get_mrs_model_for_content_type,
+            enable_table_aware=config.summarizer_enable_table_aware,
+            table_topk_rows=config.summarizer_table_topk_rows,
+            table_max_rows_verbatim=config.summarizer_table_max_rows_verbatim,
+            table_max_cols_verbatim=config.summarizer_table_max_cols_verbatim,
         )
         
         # Initialize context assembler
@@ -393,6 +400,11 @@ ADDITIONAL QUALITY GUIDELINES:
 6. When official/primary sources exist, they are authoritative
 7. Only report what sources ACTUALLY say - do not paraphrase in ways that change meaning
 8. Your goal is ACCURACY and CLARITY, not drama
+
+TABLE HANDLING:
+- If any Markdown tables appear in the research summaries, include them verbatim in the relevant sections.
+- If a large table has been compacted in the summaries, include the compacted version as-is, including its note line. Do NOT recompute totals or statistics and do NOT reformat tables.
+- If a table doesn't fit naturally inline, create a short "Tables" subsection under the appropriate section or add an "Appendix: Tables" at the end and reference it inline.
 
 Please provide a well-structured report with:
 1. Executive summary
