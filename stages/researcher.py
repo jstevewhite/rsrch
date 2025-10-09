@@ -100,6 +100,10 @@ class Researcher:
             return self._execute_serp_search(query, search_type, num_results)
         elif provider == "TAVILY":
             return self._execute_tavily_search(query, search_type, num_results)
+        elif provider == "PERPLEXITY":
+            # Perplexity Search API does not support distinct types like 'news' or 'scholar'.
+            # We'll ignore search_type and perform a general search.
+            return self._execute_perplexity_search(query, num_results)
         else:
             raise ValueError(f"Unknown search provider: {provider}")
     
@@ -293,3 +297,112 @@ class Researcher:
                 continue
         
         return results
+
+    def _execute_perplexity_search(self, query: str, num_results: int = 10) -> List[SearchResult]:
+        """
+        Execute a search using Perplexity Search API.
+
+        Tries the official Python SDK if available, and falls back to direct HTTP
+        if the SDK is not installed. Parses results into SearchResult objects.
+
+        Args:
+            query: Search query string
+            num_results: Number of results to return
+
+        Returns:
+            List of SearchResult objects
+
+        Raises:
+            Exception if API call fails or API key is missing
+        """
+        api_key = self.config.perplexity_api_key or os.getenv("PERPLEXITY_API_KEY")
+        if not api_key:
+            raise Exception("PERPLEXITY_API_KEY not found in environment")
+
+        # Try SDK first
+        try:
+            from perplexity import Perplexity  # type: ignore
+
+            logger.debug("Using Perplexity SDK for search")
+            client = Perplexity(api_key=api_key)
+            response = client.search.create(
+                query=query,
+                max_results=num_results,
+                max_tokens_per_page=1024,
+            )
+
+            items = getattr(response, "results", None)
+            if items is None and isinstance(response, dict):
+                items = response.get("results", [])
+            if items is None:
+                items = []
+
+            results: List[SearchResult] = []
+            for i, item in enumerate(items):
+                try:
+                    title = getattr(item, "title", None) or item.get("title", "")
+                    url = getattr(item, "url", None) or item.get("url", "")
+                    snippet = getattr(item, "snippet", None) or item.get("snippet", "")
+                    results.append(SearchResult(
+                        url=url,
+                        title=title,
+                        snippet=snippet,
+                        rank=i + 1,
+                        relevance_score=None
+                    ))
+                except Exception as e:
+                    logger.warning(f"Error parsing Perplexity SDK result: {e}")
+                    continue
+
+            # Limit to requested count
+            if len(results) > num_results:
+                results = results[:num_results]
+
+            return results
+        except ImportError:
+            logger.info("Perplexity SDK not installed; using HTTP fallback")
+        except Exception as e:
+            logger.warning(f"Perplexity SDK call failed ({e}); falling back to HTTP")
+
+        # HTTP fallback
+        url = "https://api.perplexity.ai/search"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "query": query,
+            # Some docs/sdks use max_results; include top_k for compatibility
+            "max_results": num_results,
+            "top_k": num_results,
+            "max_tokens_per_page": 1024,
+        }
+
+        try:
+            logger.debug(f"Calling Perplexity Search API: query={query}")
+            resp = requests.post(url, headers=headers, json=payload, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("results", [])
+
+            results: List[SearchResult] = []
+            for i, item in enumerate(items):
+                try:
+                    results.append(SearchResult(
+                        url=item.get("url", ""),
+                        title=item.get("title", ""),
+                        snippet=item.get("snippet", ""),
+                        rank=i + 1,
+                        relevance_score=None
+                    ))
+                except Exception as e:
+                    logger.warning(f"Error parsing Perplexity HTTP result: {e}")
+                    continue
+
+            if len(results) > num_results:
+                results = results[:num_results]
+
+            return results
+        except requests.RequestException as e:
+            logger.error(f"Perplexity API request failed: {e}")
+            raise
