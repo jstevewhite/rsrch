@@ -296,6 +296,29 @@ Each report includes:
 - Research limitations (if incomplete)
 - Metadata (intent, status, number of sources)
 
+## Tests
+
+You can run the included tests directly with Python:
+
+```bash
+# Scraper tests (batch + single URL)
+python test_scraper.py
+python test_scraper_url.py
+
+# Scraper HTML→Markdown table conversion (new)
+python test_scraper_tables.py
+
+# Summarizer tests
+python test_summarizer.py
+
+# Table-aware summarizer tests (new)
+python test_tables.py
+```
+
+Notes:
+- test_scraper_tables.py validates that a simple HTML <table> becomes a Markdown pipe table in the primary scraper when OUTPUT_FORMAT=markdown and PRESERVE_TABLES=true.
+- test_tables.py ensures small tables are preserved verbatim and large tables are compacted with accurate aggregates.
+
 ## Development Status
 
 ### Current Status (v1.0)
@@ -371,6 +394,11 @@ The pipeline can perform multiple research iterations:
   - `ENABLE_TABLE_AWARE=true`
   - `TABLE_TOPK_ROWS` set to desired number (e.g., 100)
 - The pipeline now reads these from `.env` and passes them into the summarizer.
+
+### Verification Notes (composite claims)
+- If a sentence combines multiple facts (e.g., classification + counts), attach multiple citations so each part is supported (e.g., [Source 3][Source 7]).
+- Prefer splitting into two sentences when possible for easier verification and clearer sourcing.
+- The verifier will be stricter if only one citation is provided but both parts are asserted; include the missing source to avoid false negatives.
 - Optional: Configure `SERPER_API_KEY` or `JINA_API_KEY` for fallback scraping
 - Check `research_pipeline.log` for detailed error messages
 
