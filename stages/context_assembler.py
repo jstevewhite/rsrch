@@ -4,7 +4,7 @@ import logging
 import sqlite3
 import requests
 import numpy as np
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
 from ..models import Summary, ContextPackage, ResearchPlan, Query
@@ -106,9 +106,27 @@ class VectorStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
     
+    def _connect(self) -> sqlite3.Connection:
+        """Open a connection and register custom SQL functions (e.g., cosine_sim)."""
+        conn = sqlite3.connect(str(self.db_path))
+        # Register cosine similarity over BLOB embeddings
+        def _cosine_sim_sql(emb_blob: bytes, query_blob: bytes, dim: int) -> float:
+            try:
+                a = np.frombuffer(emb_blob, dtype=np.float32, count=dim)
+                b = np.frombuffer(query_blob, dtype=np.float32, count=dim)
+                na = np.linalg.norm(a)
+                nb = np.linalg.norm(b)
+                if na == 0 or nb == 0:
+                    return 0.0
+                return float(np.dot(a, b) / (na * nb))
+            except Exception:
+                return 0.0
+        conn.create_function("cosine_sim", 3, _cosine_sim_sql)
+        return conn
+    
     def _init_db(self):
         """Initialize database schema."""
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._connect()
         cursor = conn.cursor()
         
         # Create summaries table
@@ -149,7 +167,7 @@ class VectorStore:
         Returns:
             List of summary IDs
         """
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._connect()
         cursor = conn.cursor()
         
         summary_ids = []
@@ -191,7 +209,7 @@ class VectorStore:
         Returns:
             Embedding as numpy array or None
         """
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._connect()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -208,6 +226,31 @@ class VectorStore:
             return embedding
         return None
 
+
+    def search_similar_in_ids(self, summary_ids: List[int], query_embedding: List[float], top_k: int) -> List[Tuple[int, float]]:
+        """Search top-k similar summaries among a given set of summary IDs using SQL cosine_sim.
+        Returns list of (summary_id, score) sorted by score desc.
+        """
+        if not summary_ids:
+            return []
+        conn = self._connect()
+        cursor = conn.cursor()
+        emb_bytes = np.array(query_embedding, dtype=np.float32).tobytes()
+        # Build parameterized IN clause
+        placeholders = ','.join(['?'] * len(summary_ids))
+        sql = f"""
+            SELECT s.id, cosine_sim(e.embedding, ?, e.dimension) AS score
+            FROM summaries s
+            JOIN embeddings e ON e.summary_id = s.id
+            WHERE s.id IN ({placeholders})
+            ORDER BY score DESC
+            LIMIT ?
+        """
+        params = [emb_bytes] + summary_ids + [top_k]
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+        conn.close()
+        return [(int(r[0]), float(r[1])) for r in rows]
 
 class ContextAssembler:
     """
@@ -293,21 +336,32 @@ class ContextAssembler:
         
         # Step 3: Store in vector database
         logger.info("Storing embeddings in vector database...")
-        self.vector_store.store_summaries(summaries, summary_embeddings)
+        summary_ids = self.vector_store.store_summaries(summaries, summary_embeddings)
         
-        # Step 4: Calculate relevance scores
-        logger.info("Calculating relevance scores...")
-        ranked_summaries = self._rank_by_relevance(
-            summaries,
-            summary_embeddings,
-            query_embedding
-        )
+        # Step 4: Calculate relevance scores via SQLite vector search
+        logger.info("Calculating relevance scores (SQLite vector search)...")
+        # Determine top-k count first for efficiency
+        top_k_count = max(1, int(len(summaries) * self.top_k_ratio))
+        id_score_pairs = self.vector_store.search_similar_in_ids(summary_ids, query_embedding, top_k_count)
+        # Map summary_id -> summary object (preserve only those returned)
+        id_to_summary = {sid: s for sid, s in zip(summary_ids, summaries)}
+        top_summaries: List[Summary] = []
+        for sid, score in id_score_pairs:
+            s = id_to_summary.get(sid)
+            if s is not None:
+                s.relevance_score = float(score)
+                top_summaries.append(s)
         
-        # Step 5: Filter top K
-        top_k_count = max(1, int(len(ranked_summaries) * self.top_k_ratio))
-        top_summaries = ranked_summaries[:top_k_count]
+        if not top_summaries:
+            logger.warning("SQLite vector search returned no matches; falling back to in-memory ranking")
+            ranked_summaries = self._rank_by_relevance(
+                summaries,
+                summary_embeddings,
+                query_embedding
+            )
+            top_summaries = ranked_summaries[:top_k_count]
         
-        logger.info(f"Selected top {top_k_count}/{len(summaries)} summaries (threshold: {top_summaries[-1].relevance_score:.3f})")
+        logger.info(f"Selected top {len(top_summaries)}/{len(summaries)} summaries (threshold: {top_summaries[-1].relevance_score:.3f})")
         
         # Step 6: Package context
         context = ContextPackage(
