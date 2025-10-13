@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
@@ -37,6 +37,9 @@ class Config:
     search_results_per_query: int  # Number of search results to request per query
     rerank_top_k_url: float  # Ratio of search results to scrape (Stage 4.5)
     rerank_top_k_sum: float  # Ratio of summaries to include in report (Stage 7)
+    
+    # Domain Exclusions
+    exclude_domains: List[str]
     
     # Vector Database Configuration
     vector_db_path: Path
@@ -95,6 +98,10 @@ class Config:
         def get_optional(key: str, default: str) -> str:
             return os.getenv(key, default)
         
+        # Parse excluded domains (comma-separated)
+        exclude_domains_env = os.getenv("EXCLUDE_DOMAINS", "")
+        exclude_domains_list = [d.strip().lower() for d in exclude_domains_env.split(',') if d.strip()]
+        
         return cls(
             api_key=get_required("API_KEY"),
             api_endpoint=get_optional("API_ENDPOINT", "https://api.openai.com/v1"),
@@ -119,6 +126,9 @@ class Config:
             search_results_per_query=int(get_optional("SEARCH_RESULTS_PER_QUERY", "10")),
             rerank_top_k_url=float(get_optional("RERANK_TOP_K_URL", "0.3")),
             rerank_top_k_sum=float(get_optional("RERANK_TOP_K_SUM", "0.5")),
+            
+            # Domain exclusions
+            exclude_domains=exclude_domains_list,
             
             vector_db_path=Path(get_optional("VECTOR_DB_PATH", "./research_db.sqlite")),
             embedding_model=get_optional("EMBEDDING_MODEL", "text-embedding-3-small"),

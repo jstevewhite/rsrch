@@ -142,6 +142,8 @@ REPORT_MODEL=gpt-4o
 
 # Search Configuration (Serper.dev provides both search and scraping)
 SERPER_API_KEY=your_serper_api_key  # Required for web search and scraping fallback
+# Exclude domains (comma-separated). Example: exclude YouTube
+EXCLUDE_DOMAINS=youtube.com,youtu.be
 # Perplexity Search API (optional; use if SEARCH_PROVIDER=PERPLEXITY)
 PERPLEXITY_API_KEY=your_perplexity_api_key
 # Choose provider: SERP (Serper), TAVILY, or PERPLEXITY

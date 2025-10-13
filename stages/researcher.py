@@ -4,6 +4,7 @@ import logging
 import os
 import requests
 from typing import List, Dict, Any
+from urllib.parse import urlparse
 from ..models import ResearchPlan, SearchResult, Intent
 from ..config import Config
 
@@ -46,11 +47,14 @@ class Researcher:
             
             try:
                 # Execute search using configured provider
+                # Execute search
                 results = self._execute_search(
                     query=search_query.query,
                     search_type=search_type,
                     num_results=self.config.search_results_per_query
                 )
+                # Post-filter excluded domains
+                results = self._filter_excluded_results(results)
                 
                 logger.info(f"Found {len(results)} results for query: {search_query.query}")
                 all_results.extend(results)
@@ -134,6 +138,11 @@ class Researcher:
             'X-API-KEY': serper_api_key,
             'Content-Type': 'application/json'
         }
+        
+        # Apply domain exclusions via query operators if configured
+        if self.config.exclude_domains:
+            exclude_ops = ' '.join(f"-site:{d}" for d in self.config.exclude_domains)
+            query = f"{query} {exclude_ops}".strip()
         
         payload = {
             'q': query,
@@ -234,6 +243,8 @@ class Researcher:
         else:
             logger.info("Using Tavily API with free tier (no API key)")
         
+        # Apply domain exclusions to payload if configured
+        exclude_domains = self.config.exclude_domains or []
         payload = {
             'query': query,
             'search_depth': 'basic' if not self.config.tavily_api_key else 'advanced',
@@ -242,7 +253,7 @@ class Researcher:
             'include_raw_content': False,
             'max_results': num_results,
             'include_domains': [],
-            'exclude_domains': []
+            'exclude_domains': exclude_domains
         }
         
         try:
@@ -370,6 +381,11 @@ class Researcher:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
+        # Apply domain exclusions via query operators if configured
+        if self.config.exclude_domains:
+            exclude_ops = ' '.join(f"-site:{d}" for d in self.config.exclude_domains)
+            query = f"{query} {exclude_ops}".strip()
+        
         payload = {
             "query": query,
             # Some docs/sdks use max_results; include top_k for compatibility
@@ -406,3 +422,23 @@ class Researcher:
         except requests.RequestException as e:
             logger.error(f"Perplexity API request failed: {e}")
             raise
+    
+    # --- helpers ---
+    def _filter_excluded_results(self, results: List[SearchResult]) -> List[SearchResult]:
+        """Filter out results whose domain matches configured exclude_domains."""
+        if not self.config.exclude_domains:
+            return results
+        excluded = set(self.config.exclude_domains)
+        filtered: List[SearchResult] = []
+        for r in results:
+            try:
+                netloc = urlparse(r.url).netloc.lower()
+                # Strip port
+                host = netloc.split(':')[0]
+                # Match against end of host (handles subdomains)
+                if any(host == d or host.endswith(f".{d}") for d in excluded):
+                    continue
+                filtered.append(r)
+            except Exception:
+                filtered.append(r)
+        return filtered
