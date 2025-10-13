@@ -131,6 +131,8 @@ def test_large_table_compacted():
 
     # Note line with selection and aggregates should be present
     assert any("Showing 10 of 25 rows" in ln and "selection=max by Accuracy" in ln for ln in note_lines)
+    # Numeric fidelity: mean and max should match Python-computed values
+    assert any("Accuracy mean=0.74" in ln and "max=0.98" in ln for ln in note_lines)
 
 
 if __name__ == "__main__":
