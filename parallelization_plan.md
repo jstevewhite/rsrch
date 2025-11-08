@@ -8,10 +8,8 @@ Implement configurable parallelization across the research pipeline's three I/O-
 ```bash
 SEARCH_PARALLEL=2      # Number of concurrent search queries (default: 1)
 SCRAPE_PARALLEL=5      # Number of concurrent scrape operations (default: 5, already exists)
-SUMMARY_PARALLEL=2     # Number of concurrent summarization tasks (default: 1) ⚠️ COST IMPACT
+SUMMARY_PARALLEL=2     # Number of concurrent summarization tasks (default: 1)
 ```
-
-⚠️ **CRITICAL WARNING - LLM COST IMPACT**: `SUMMARY_PARALLEL` directly multiplies LLM API costs. `SUMMARY_PARALLEL=4` means 4× the summarization cost. See [Cost Considerations](#cost-considerations) below.
 
 Setting any value to `1` effectively disables parallelization for that stage.
 
@@ -25,31 +23,36 @@ Setting any value to `1` effectively disables parallelization for that stage.
 
 ---
 
-## Cost Considerations
+## Rate Limiting & Resource Considerations
 
-### ⚠️ CRITICAL: LLM API Cost Impact
+### Important: Token Cost Impact
 
-The `SUMMARY_PARALLEL` setting has **direct financial implications**:
+**Parallelization does NOT increase token costs.** The same documents are processed with the same number of tokens regardless of parallelization setting:
 
-| Setting | Cost Multiplier | Example Cost/Run | Monthly (100 runs) |
-|---------|----------------|------------------|--------------------|
-| SUMMARY_PARALLEL=1 | 1× (baseline) | $0.03 | $3.00 |
-| SUMMARY_PARALLEL=2 | 2× baseline | $0.06 | $6.00 |
-| SUMMARY_PARALLEL=4 | 4× baseline | $0.12 | $12.00 |
-| SUMMARY_PARALLEL=8 | 8× baseline | $0.24 | $24.00 |
+- Sequential (SUMMARY_PARALLEL=1): 10 docs × N tokens = cost X
+- Parallel (SUMMARY_PARALLEL=4): 10 docs × N tokens = cost X (same cost)
 
-**Key Points:**
-- Each parallel worker makes independent LLM API calls
-- Cost scales linearly with the number of workers
-- Search and scraping parallelization have minimal cost impact
-- **Recommendation:** Start with `SUMMARY_PARALLEL=1` or `2`, monitor costs closely
+**Benefit of parallelization:** Speed improvement (linear with worker count)
+- Sequential: Takes T seconds
+- Parallel (4 workers): Takes ~T/4 seconds (4× faster)
 
-### Cost Monitoring Recommendations
+**Risk of parallelization:** May trigger API rate limits
+- Higher parallelization = more concurrent API requests
+- APIs limit concurrent connections or requests per minute
+- Too many concurrent requests = HTTP 429 (Too Many Requests)
 
-1. **Track API usage** in your OpenRouter/LLM provider dashboard
-2. **Start conservative** with low parallelization settings
-3. **Benchmark costs** before increasing parallelization
-4. **Set spending alerts** if your provider supports them
+### Rate Limit Awareness
+
+**If you see 429 errors:**
+1. Reduce the corresponding parallelization setting
+2. Check your API provider's tier limits
+3. Consider upgrading to higher tier if needed
+
+**Recommended approach:**
+1. Start with conservative settings (2-1-2)
+2. Gradually increase parallelization
+3. Stop increasing when you hit rate limits
+4. Verify you're on appropriate API tier for your desired parallelization
 
 ---
 
@@ -489,13 +492,13 @@ self.summarizer = Summarizer(
     table_max_cols_verbatim=config.summarizer_table_max_cols_verbatim,
 )
 
-# Cost monitoring warning
+# Rate limit awareness warning
 if config.summary_parallel > 4:
     logger.warning(
         f"SUMMARY_PARALLEL is set to {config.summary_parallel}. "
-        f"This may result in significantly higher LLM costs. "
-        f"Each worker makes independent API calls. "
-        f"Monitor your OpenRouter/LLM provider usage and billing."
+        f"This makes {config.summary_parallel} concurrent LLM API calls. "
+        f"Verify your OpenRouter account tier supports this concurrency level. "
+        f"If you see 429 (Too Many Requests) errors, reduce SUMMARY_PARALLEL."
     )
 ```
 
@@ -523,16 +526,10 @@ SEARCH_PARALLEL=2
 SCRAPE_PARALLEL=5
 
 # Summarization: Number of concurrent LLM calls
-# ⚠️  WARNING: DIRECT COST IMPACT ⚠️
-# Setting SUMMARY_PARALLEL > 1 significantly increases LLM costs!
-# Each worker makes a separate API call.
-# Example cost impact:
-# - SUMMARY_PARALLEL=1: ~$0.03 per run
-# - SUMMARY_PARALLEL=2: ~$0.06 per run (2x cost)
-# - SUMMARY_PARALLEL=4: ~$0.12 per run (4x cost)
-# - SUMMARY_PARALLEL=8: ~$0.24 per run (8x cost)
-# Monitor your OpenRouter usage and bill closely.
-# Recommended: Start with 1-2, monitor costs closely
+# Note: Same tokens = same cost regardless of parallelization
+# Benefit: Same documents summarized in ~1/N time (N = number of workers)
+# Risk: Concurrent requests may trigger rate limits if API tier is too low
+# Recommendation: Start with 1-2, monitor for rate limit 429 errors
 SUMMARY_PARALLEL=2
 ```
 
@@ -552,33 +549,34 @@ SEARCH_PARALLEL=2
 # Scraping: Concurrent scrape operations (default: 5)
 SCRAPE_PARALLEL=5
 
-# Summarization: Concurrent LLM calls (default: 1) ⚠️ COST IMPACT
+# Summarization: Concurrent LLM calls (default: 1)
 SUMMARY_PARALLEL=2
 ```
 
-## Cost Considerations for Parallelization
+## Understanding Parallelization Trade-offs
 
-### ⚠️ Summarization Parallelization Impact
+### Cost Impact
 
-The `SUMMARY_PARALLEL` setting has a direct impact on LLM API costs:
+**Same tokens = same cost** regardless of parallelization:
+- Sequential (SUMMARY_PARALLEL=1): 10 docs × N tokens = $X
+- Parallel (SUMMARY_PARALLEL=4): 10 docs × N tokens = $X (identical cost)
 
-- **SUMMARY_PARALLEL=1** (sequential): Baseline cost for summarization
-- **SUMMARY_PARALLEL=2**: ~2× the summarization cost
-- **SUMMARY_PARALLEL=4**: ~4× the summarization cost
-- **SUMMARY_PARALLEL=8**: ~8× the summarization cost
+### Speed Impact
 
-Example: A 10-document research run with average cost $0.03/run
-- Sequential: $0.03/run
-- SUMMARY_PARALLEL=4: $0.12/run
-- SUMMARY_PARALLEL=8: $0.24/run
+**Linear speedup with parallelization:**
+- SUMMARY_PARALLEL=1: Takes T seconds
+- SUMMARY_PARALLEL=2: Takes ~T/2 seconds
+- SUMMARY_PARALLEL=4: Takes ~T/4 seconds
 
-**Recommendation:** Start with `SUMMARY_PARALLEL=1` or `2`, monitor your actual costs, and only increase if you have budget for it and understand the cost implications.
+### Rate Limit Risk
 
-### Performance vs Rate Limits
+Higher parallelization increases concurrent API requests, which may trigger rate limits:
 
-- **SEARCH_PARALLEL**: Set to 1 if hitting search API rate limits
-- **SCRAPE_PARALLEL**: Reduce if experiencing network throttling
-- **SUMMARY_PARALLEL**: Higher = faster but exponentially more expensive LLM costs
+- **SEARCH_PARALLEL**: Higher = more concurrent search API calls
+- **SCRAPE_PARALLEL**: Higher = more concurrent HTTP requests
+- **SUMMARY_PARALLEL**: Higher = more concurrent LLM API calls
+
+**If you see HTTP 429 errors:** Reduce the corresponding parallelization setting
 
 ### Performance Expectations
 
@@ -596,10 +594,10 @@ Example: A 10-document research run with average cost $0.03/run
 
 | Use Case | SEARCH | SCRAPE | SUMMARY | Notes |
 |----------|--------|--------|---------|-------|
-| **Default (balanced)** | 2 | 5 | 2 | Good balance of speed vs cost |
-| **Speed (cost-aware)** | 4 | 10 | 4 | Monitor LLM costs closely |
-| **Rate-limited APIs** | 1 | 3 | 1 | Conservative for API limits |
-| **Cost optimization** | 1 | 5 | 1 | Minimize LLM parallelization costs |
+| **Default (balanced)** | 2 | 5 | 2 | Good balance of speed vs rate limit risk |
+| **Maximum speed** | 4 | 10 | 4 | Only if high API tier verified |
+| **Rate-limit safe** | 1 | 3 | 1 | Conservative, no rate limit risk |
+| **Speed priority** | 2 | 8 | 3 | Moderate speed increase |
 | **Testing/Development** | 1 | 1 | 1 | All sequential for debugging |
 ```
 
@@ -857,7 +855,8 @@ Query: "What is Python asyncio?" - IDEAL CONDITIONS
 - 10 URLs scraped × 1s = 10s (already parallel at 5 workers)
 - 10 summaries × 3s = 30s
 Total: ~46 seconds
-Cost: ~$0.03 (baseline)
+Cost: ~$0.03 (baseline tokens)
+Rate limit risk: NONE
 ```
 
 ### With Conservative Parallelization (SEARCH=2, SCRAPE=5, SUMMARY=2):
@@ -867,7 +866,8 @@ Query: "What is Python asyncio?" - IDEAL CONDITIONS
 - 10 URLs scraped ÷ 5 workers = 2s (same)
 - 10 summaries ÷ 2 workers = 15s (50% faster)
 Total: ~21 seconds (54% faster overall)
-Cost: ~$0.06 (2× summarization cost)
+Cost: ~$0.03 (SAME - same tokens)
+Rate limit risk: LOW (concurrent requests well within most API tiers)
 ```
 
 ### With Aggressive Parallelization (SEARCH=4, SCRAPE=10, SUMMARY=4):
@@ -877,10 +877,15 @@ Query: "What is Python asyncio?" - IDEAL CONDITIONS
 - 10 URLs scraped ÷ 10 workers = 1s (50% faster)
 - 10 summaries ÷ 4 workers = 8s (73% faster)
 Total: ~11 seconds (76% faster overall)
-Cost: ~$0.12 (4× summarization cost)
+Cost: ~$0.03 (SAME - same tokens)
+Rate limit risk: MEDIUM-HIGH (verify account tier supports this concurrency)
 ```
 
-**Reality Check**: API latency can be 5-30× higher than these estimates. LLM calls often take 5-30 seconds each, not 3 seconds. Always benchmark with your actual environment before optimizing.
+**Reality Check**: 
+- API latency can be 5-30× higher than these estimates. LLM calls often take 5-30 seconds each, not 3 seconds
+- **Higher parallelization = faster execution** at the cost of higher rate limit risk
+- **Token cost stays identical** regardless of parallelization level
+- Always benchmark with your actual environment before optimizing
 
 ---
 
