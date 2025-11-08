@@ -9,6 +9,7 @@ The `stages/researcher.py` module is now **fully functional** with direct Serper
 **File:** `stages/researcher.py` (166 lines)
 
 **Key Features:**
+
 1. ✅ Direct Serper API integration (no MCP dependency)
 2. ✅ Intent-aware search type selection
 3. ✅ Proper error handling and logging
@@ -25,11 +26,13 @@ results = researcher.search(plan)  # Returns List[SearchResult]
 ```
 
 **Search Type Selection:**
+
 - `Intent.NEWS` → Uses Serper "news" search
 - `Intent.RESEARCH` → Uses Serper "scholar" search
 - All others → Uses Serper general "search"
 
 **API Call:**
+
 ```python
 POST https://google.serper.dev/search
 Headers: X-API-KEY, Content-Type: application/json
@@ -37,13 +40,14 @@ Body: {"q": query, "num": 10, "type": search_type}
 ```
 
 **Response Parsing:**
+
 - Extracts: `link`, `title`, `snippet`
 - Creates `SearchResult` objects with proper ranking
 - Handles different response structures for news/scholar/general
 
 ## Pipeline Integration
 
-### Updated Files:
+### Updated Files
 
 1. **`stages/researcher.py`** - ✅ Complete implementation
 2. **`stages/__init__.py`** - ✅ Exports Researcher and Scraper
@@ -53,7 +57,7 @@ Body: {"q": query, "num": 10, "type": search_type}
    - Calls `scraper.scrape_results()` in stage 5
    - Logs scraping statistics
 
-### Pipeline Flow (Updated):
+### Pipeline Flow (Updated)
 
 ```
 User Query
@@ -82,20 +86,23 @@ Stage 9: Report Generation ✅
 ### Test Script Created: `test_researcher.py`
 
 **Run it:**
+
 ```bash
 python test_researcher.py
 ```
 
 **What it tests:**
+
 1. Checks for SERPER_API_KEY
 2. Creates test query with CODE intent
 3. Executes 2 search queries
 4. Displays results with titles, URLs, snippets
 5. Returns success/failure status
 
-### Manual Testing:
+### Manual Testing
 
 **Test researcher directly:**
+
 ```python
 from stages.researcher import Researcher
 from models import ResearchPlan, Query, SearchQuery, Intent
@@ -116,11 +123,13 @@ print(f"Found {len(results)} results")
 ```
 
 **Test full pipeline (stages 1-5, 9):**
+
 ```bash
 python cli.py "How does asyncio work in Python?"
 ```
 
 Expected output:
+
 - Classifies as CODE intent
 - Creates research plan
 - Searches via Serper API
@@ -129,7 +138,7 @@ Expected output:
 
 ## Configuration
 
-### Required Environment Variable:
+### Required Environment Variable
 
 ```bash
 # .env
@@ -138,7 +147,8 @@ SERPER_API_KEY=e48bfa72dee2189550a0468ee4eb9a985939e8dd
 
 You already have this configured!
 
-### Optional (for scraping fallbacks):
+### Optional (for scraping fallbacks)
+
 ```bash
 JINA_API_KEY=your_jina_key  # For higher scraping rate limits
 ```
@@ -146,6 +156,7 @@ JINA_API_KEY=your_jina_key  # For higher scraping rate limits
 ## Code Quality
 
 **Features:**
+
 - ✅ Type hints on all methods
 - ✅ Comprehensive docstrings
 - ✅ Error handling with try/except
@@ -154,6 +165,7 @@ JINA_API_KEY=your_jina_key  # For higher scraping rate limits
 - ✅ Follows existing codebase patterns
 
 **Error Handling:**
+
 - API key validation
 - HTTP request failures
 - Response parsing errors
@@ -162,10 +174,12 @@ JINA_API_KEY=your_jina_key  # For higher scraping rate limits
 ## API Cost
 
 **Serper API Pricing:**
+
 - ~$0.003 per search request
 - 10 results per search by default
 
 **Example Usage:**
+
 - 1 query with 3 search terms = 3 API calls = ~$0.009
 - 100 queries/day × 3 searches avg = 300 calls = ~$0.90/day
 - Monthly (30 days): ~$27
@@ -174,17 +188,19 @@ JINA_API_KEY=your_jina_key  # For higher scraping rate limits
 
 ## Updated Pipeline Status
 
-### Before:
+### Before
+
 - **40% Complete**
 - Stages 1-3, 9 working
 - Stages 4-8 not implemented
 
-### Now:
+### Now
+
 - **60% Complete** 🎉
 - Stages 1-5, 9 working
 - Stages 6-8 still need implementation
 
-### Remaining Work:
+### Remaining Work
 
 | Stage | Status | Effort |
 |-------|--------|--------|
@@ -195,26 +211,31 @@ JINA_API_KEY=your_jina_key  # For higher scraping rate limits
 
 ## Next Steps
 
-### Immediate Testing:
+### Immediate Testing
+
 1. Run test script:
+
    ```bash
    python test_researcher.py
    ```
 
 2. Test full pipeline:
+
    ```bash
    python cli.py "What is Python asyncio?"
    ```
 
 3. Check generated report:
+
    ```bash
    ls -lh reports/
    cat reports/report_*.md
    ```
 
-### What You Should See:
+### What You Should See
 
 **Console Output:**
+
 ```
 Stage 1: Query parsed
 Stage 2: Identifying intent...
@@ -230,14 +251,16 @@ Report saved to: ./reports/report_20250930_191036.md
 ```
 
 **Report Will Contain:**
+
 - Real web search results
 - Scraped content from actual URLs
 - Proper formatting
 - Metadata about sources
 
-### Future Development:
+### Future Development
 
 **Phase 2:** Implement remaining stages
+
 1. Create `stages/summarizer.py`
 2. Create `stages/context_assembler.py`
 3. Create `stages/reflector.py`
@@ -253,6 +276,7 @@ Report saved to: ./reports/report_20250930_191036.md
 ✅ **60% of pipeline complete**
 
 **You can now:**
+
 - Execute real web searches
 - Scrape actual content
 - Generate reports with real data

@@ -2,6 +2,11 @@
 
 A modular, configurable CLI tool for automated research report generation using LLMs.
 
+## What's New
+- SQLite vector search in ContextAssembler now uses DB-based top-k cosine similarity via a registered cosine_sim() SQL function; automatically falls back to in-memory similarity when the database has no embeddings.
+- EXCLUDE_DOMAINS is applied across providers (SERP/Perplexity via -site:domain, Tavily via request payload) and results are post-filtered by domain. Default example excludes YouTube.
+- Tests: added HTML→Markdown table conversion test for the scraper and strengthened large-table summarizer tests to assert computed aggregates.
+
 ## Notes
 
 This research pipeline is primarily 'vibe-coded' using Warp and Windsurf. (Some recent articles suggest it's not vibe coding if you actually read and understand the code, so ... I have read and understand the code; make your own call :D) I wrote maybe ... 5-10% of the code. The design is mine, e.g. the pipeline layout, the steps, design decisions, etc. I've been iterating a research agent for some time, mostly for personal learning. The models involved have been primarily GPT5 and Claude Sonnet 4.5 - which produces the fewest errors so far. I use the zen MCP server with Gemini Pro 2.5 for codereview stuff, context7 for api currency, and perplexity for web search. 
@@ -142,7 +147,7 @@ REPORT_MODEL=gpt-4o
 
 # Search Configuration (Serper.dev provides both search and scraping)
 SERPER_API_KEY=your_serper_api_key  # Required for web search and scraping fallback
-# Exclude domains (comma-separated). Example: exclude YouTube
+# Exclude domains (comma-separated). Applied as -site:domain for SERP/Perplexity, and 'exclude' payload for Tavily; results are also post-filtered by domain. Example: exclude YouTube
 EXCLUDE_DOMAINS=youtube.com,youtu.be
 # Perplexity Search API (optional; use if SEARCH_PROVIDER=PERPLEXITY)
 PERPLEXITY_API_KEY=your_perplexity_api_key
@@ -156,6 +161,8 @@ RERANK_TOP_K_SUM=0.5   # Ratio of summaries to include in report (0.0-1.0)
 # Vector Database Configuration
 VECTOR_DB_PATH=./research_db.sqlite
 EMBEDDING_MODEL=text-embedding-3-small
+
+Vector search notes: ContextAssembler now performs top-k retrieval directly in SQLite using a registered cosine_sim() SQL function when embeddings are present. If the database is empty, it falls back to in-memory similarity.
 
 # Reranker Configuration (optional)
 # RERANKER_URL=https://api.jina.ai/v1/rerank
@@ -443,7 +450,7 @@ SEARCH_PROVIDER=TAVILY
 - Optional: Provide `TAVILY_API_KEY` for higher rate limits and advanced features
 - Good fallback option when SERPER API is unavailable
 
-The pipeline will automatically use your chosen provider for all web searches.points
+The pipeline will automatically use your chosen provider for all web searches.
 6. **Testing**: Unit and integration tests
 7. **Performance**: Optimize vector operations and caching
 
