@@ -52,6 +52,7 @@ class Summarizer:
         llm_client: LLMClient, 
         default_model: str = "gpt-4o-mini",
         model_selector: Optional[Callable[[str], str]] = None,
+        max_workers: int = 1,
         *,
         enable_table_aware: Optional[bool] = None,
         table_topk_rows: Optional[int] = None,
@@ -65,17 +66,19 @@ class Summarizer:
             llm_client: LLM client for generating summaries
             default_model: Default model to use for summarization
             model_selector: Optional function that takes content type and returns model name
+            max_workers: Number of parallel workers for summarization
         """
         self.llm_client = llm_client
         self.default_model = default_model
         self.model_selector = model_selector
+        self.max_workers = max(1, int(max_workers))
         # Instance-level table settings (override class defaults if provided)
         self.enable_table_aware = self.ENABLE_TABLE_AWARE if enable_table_aware is None else bool(enable_table_aware)
         self.table_topk_rows = self.TABLE_TOPK_ROWS if table_topk_rows is None else int(table_topk_rows)
         self.table_max_rows_verbatim = self.TABLE_MAX_ROWS_VERBATIM if table_max_rows_verbatim is None else int(table_max_rows_verbatim)
         self.table_max_cols_verbatim = self.TABLE_MAX_COLS_VERBATIM if table_max_cols_verbatim is None else int(table_max_cols_verbatim)
         logger.info(
-            f"Summarizer initialized with default model: {default_model} "
+            f"Summarizer initialized with default model: {default_model}, max_workers: {self.max_workers} "
             f"(tables: aware={self.enable_table_aware}, topk={self.table_topk_rows}, small<={self.table_max_rows_verbatim}x{self.table_max_cols_verbatim})"
         )
     
@@ -172,24 +175,69 @@ REMEMBER: The source material reflects REALITY. Your training data reflects THE 
         
         scraped_contents = deduplicated
         
-        summaries = []
-        for i, content in enumerate(scraped_contents[:max_summaries] if max_summaries else scraped_contents):
+        contents_to_summarize = scraped_contents[:max_summaries] if max_summaries else scraped_contents
+        
+        # Choose execution strategy based on config
+        if self.max_workers > 1 and len(contents_to_summarize) > 1:
+            logger.info(f"Using parallel summarization with {self.max_workers} workers")
+            summaries = self._summarize_parallel(contents_to_summarize, plan)
+        else:
+            logger.info("Using sequential summarization")
+            summaries = self._summarize_sequential(contents_to_summarize, plan)
+        
+        logger.info(f"Summarization complete: {len(summaries)}/{len(contents_to_summarize)} successful")
+        return summaries
+    
+    def _summarize_parallel(self, contents: List[ScrapedContent], plan: ResearchPlan) -> List[Summary]:
+        """Summarize multiple documents in parallel using ThreadPoolExecutor."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        results: List[Summary] = []
+        
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             try:
-                logger.info(f"Summarizing {i+1}/{len(scraped_contents)}: {content.title[:60]}...")
+                future_to_content = {
+                    executor.submit(self._summarize_content_safe, content, plan): content
+                    for content in contents
+                }
+                for future in as_completed(future_to_content):
+                    content = future_to_content[future]
+                    try:
+                        summary = future.result()
+                        if summary:
+                            results.append(summary)
+                            logger.info(f"✓ Summary generated for: {content.url}")
+                        else:
+                            logger.warning(f"✗ No summary generated for: {content.url}")
+                    except Exception as e:
+                        logger.error(f"✗ Summarization failed for {content.url}: {e}")
+            finally:
+                executor.shutdown(wait=True)
+        return results
+
+    def _summarize_sequential(self, contents: List[ScrapedContent], plan: ResearchPlan) -> List[Summary]:
+        """Summarize documents sequentially (existing behavior)."""
+        summaries: List[Summary] = []
+        for i, content in enumerate(contents):
+            try:
+                logger.info(f"Summarizing {i+1}/{len(contents)}: {content.title[:60]}...")
                 summary = self.summarize_content(content, plan)
-                
                 if summary:
                     summaries.append(summary)
                     logger.info(f"✓ Summary generated for: {content.url}")
                 else:
                     logger.warning(f"✗ No summary generated for: {content.url}")
-                    
             except Exception as e:
                 logger.error(f"Error summarizing {content.url}: {e}")
                 continue
-        
-        logger.info(f"Summarization complete: {len(summaries)}/{len(scraped_contents)} successful")
         return summaries
+
+    def _summarize_content_safe(self, content: ScrapedContent, plan: ResearchPlan) -> Optional[Summary]:
+        """Safely summarize a single document (returns None on failure)."""
+        try:
+            return self.summarize_content(content, plan)
+        except Exception as e:
+            logger.error(f"Safe summarization failed for {content.url}: {e}")
+            return None
     
     def summarize_content(
         self, 

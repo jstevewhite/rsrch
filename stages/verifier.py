@@ -86,20 +86,26 @@ class ClaimExtractor:
         Returns:
             Dictionary mapping source number to URL
         """
-        # Find all [Source N] citations in report
-        citation_pattern = r'\[Source (\d+)\]'
-        cited_numbers = set(int(match) for match in re.findall(citation_pattern, report_text))
+        # Find citations in report. Support formats:
+        # - [Source 1], [source1], [Source 1, 2]
+        # - [1], [1, 2, 3]
+        # Capture the content inside brackets and then extract all digits
+        citation_pattern = r'\[(?:source\s*)?([\d,\s]+)\]'
+        inner_groups = re.findall(citation_pattern, report_text, flags=re.IGNORECASE)
+        cited_numbers = set(
+            int(n) for group in inner_groups for n in re.findall(r'\d+', group)
+        )
         
         if not cited_numbers:
             return {}
         
-        # Map to URLs (assuming Source N corresponds to summaries[N-1])
+        # Map to URLs (assuming Source/number N corresponds to summaries[N-1])
         source_map = {}
         for num in cited_numbers:
             if 0 < num <= len(summaries):
                 source_map[num] = summaries[num - 1].url
             else:
-                logger.warning(f"Source {num} cited but not in summaries list")
+                logger.warning(f"Source number {num} cited but not in summaries list (len={len(summaries)})")
         
         return source_map
     
@@ -126,7 +132,8 @@ Report:
 
 For each claim:
 1. Extract the claim text (complete, standalone assertion)
-2. Note which [Source N] it cites (extract the N)
+2. Identify which source numbers it cites by reading bracketed citations, e.g. [1], [1, 3], [Source 2]
+   - Return all cited numbers for the claim as an array in \"source_numbers\"
 3. Classify the claim type:
    - factual: General factual statement
    - statistic: Contains numbers, percentages, counts
@@ -135,27 +142,27 @@ For each claim:
 
 Return as JSON:
 {{
-  "claims": [
+  \"claims\": [
     {{
-      "text": "Donald Trump announced a 20-point peace plan",
-      "source_number": 1,
-      "type": "factual",
-      "context": "surrounding sentence for context"
+      \"text\": \"The government shut down at 12:01 a.m. on October 1, 2025\",
+      \"source_numbers\": [1, 2, 3],
+      \"type\": \"date\",
+      \"context\": \"surrounding sentence for context\"
     }},
     {{
-      "text": "The plan was unveiled on September 29",
-      "source_number": 1,
-      "type": "date",
-      "context": "..."
+      \"text\": \"Approximately 750,000 federal employees are furloughed\",
+      \"source_numbers\": [3, 4, 5],
+      \"type\": \"statistic\",
+      \"context\": \"...\"
     }}
   ]
 }}
 
 IMPORTANT:
 - Extract COMPLETE claims that can stand alone (don't cut off mid-sentence)
-- Include ALL factual assertions that have [Source N] citations
+- Include ALL factual assertions that have bracketed source citations like [1], [1, 2] or [Source 2]
 - Don't extract opinions, analysis, or unsourced statements
-- Each claim should be verifiable against its source
+- Each claim should be verifiable against its source(s)
 - Include the surrounding context (1-2 sentences)
 """
         
@@ -168,17 +175,65 @@ IMPORTANT:
             
             claims = []
             for claim_data in response.get("claims", []):
-                source_number = claim_data.get("source_number")
-                if source_number and source_number in source_map:
-                    claims.append(ExtractedClaim(
-                        text=claim_data["text"],
-                        source_number=source_number,
-                        source_url=source_map[source_number],
-                        claim_type=claim_data.get("type", "factual"),
-                        context=claim_data.get("context", ""),
-                    ))
-                else:
-                    logger.warning(f"Claim references invalid source: {source_number}")
+                # Support both legacy single "source_number" and new plural "source_numbers"
+                numbers = []
+                if "source_numbers" in claim_data and isinstance(claim_data["source_numbers"], list):
+                    # Filter to ints only
+                    numbers = [int(n) for n in claim_data["source_numbers"] if isinstance(n, (int, str)) and str(n).isdigit()]
+                elif "source_number" in claim_data:
+                    n = claim_data.get("source_number")
+                    if isinstance(n, (int, str)) and str(n).isdigit():
+                        numbers = [int(n)]
+                
+                if not numbers:
+                    logger.warning("Claim missing source_numbers/source_number; skipping")
+                    continue
+                
+                for source_number in numbers:
+                    if source_number in source_map:
+                        claims.append(ExtractedClaim(
+                            text=claim_data.get("text", "").strip(),
+                            source_number=source_number,
+                            source_url=source_map[source_number],
+                            claim_type=claim_data.get("type", "factual"),
+                            context=claim_data.get("context", ""),
+                        ))
+                    else:
+                        logger.warning(f"Claim references invalid source number: {source_number}")
+            
+            # Fallback: if LLM returned no claims, try regex-based extraction of sentences with citations
+            if not claims:
+                logger.warning("LLM returned no claims; attempting regex-based extraction fallback")
+                try:
+                    # Split text into rough sentences (simple heuristic)
+                    # Keep punctuation; split on . ! ? followed by space/newline
+                    sentence_pattern = r'[^.!?\n]*\[[^\]]+\][^.!?\n]*[.!?]'
+                    sentence_matches = re.finditer(sentence_pattern, report_text, flags=re.IGNORECASE)
+                    seen = set()
+                    for m in sentence_matches:
+                        sentence = m.group(0).strip()
+                        key = sentence.lower()
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        # Extract all cited numbers in this sentence using the same pattern as _build_source_map
+                        bracket_groups = re.findall(r'\[(?:source\s*)?([\d,\s]+)\]', sentence, flags=re.IGNORECASE)
+                        nums = [int(n) for g in bracket_groups for n in re.findall(r'\d+', g)]
+                        valid_nums = [n for n in nums if n in source_map]
+                        if not valid_nums:
+                            continue
+                        for n in valid_nums:
+                            claims.append(ExtractedClaim(
+                                text=sentence,
+                                source_number=n,
+                                source_url=source_map[n],
+                                claim_type="factual",
+                                context=sentence,
+                            ))
+                    if claims:
+                        logger.info(f"Regex fallback extracted {len(claims)} claims")
+                except Exception as ex:
+                    logger.error(f"Regex fallback extraction failed: {ex}")
             
             return claims
             

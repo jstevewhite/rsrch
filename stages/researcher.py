@@ -17,6 +17,8 @@ class Researcher:
     def __init__(self, config: Config):
         """Initialize the researcher with configuration."""
         self.config = config
+        self.max_workers = getattr(config, "search_parallel", 1)
+        logger.info(f"Researcher initialized with {self.max_workers} parallel workers")
     
     def search(self, plan: ResearchPlan) -> List[SearchResult]:
         """
@@ -39,32 +41,77 @@ class Researcher:
         search_type = self._select_search_type(plan.query.intent)
         logger.info(f"Using search type: {search_type}")
         
-        all_results = []
+        # Choose execution strategy
+        if self.max_workers > 1 and len(plan.search_queries) > 1:
+            logger.info(f"Using parallel search with {self.max_workers} workers")
+            return self._search_parallel(plan, search_type)
+        else:
+            logger.info("Using sequential search")
+            return self._search_sequential(plan, search_type)
+
+    def _search_parallel(self, plan: ResearchPlan, search_type: str) -> List[SearchResult]:
+        """Execute search queries in parallel using ThreadPoolExecutor."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        all_results: List[SearchResult] = []
         
-        # Execute each search query
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            try:
+                future_to_query = {
+                    executor.submit(
+                        self._execute_search_safe,
+                        q.query,
+                        search_type,
+                        self.config.search_results_per_query,
+                    ): q
+                    for q in plan.search_queries
+                }
+                
+                for future in as_completed(future_to_query):
+                    q = future_to_query[future]
+                    try:
+                        results = future.result()
+                        if results:
+                            logger.info(f"✓ Found {len(results)} results for: {q.query}")
+                            all_results.extend(results)
+                        else:
+                            logger.warning(f"✗ No results for: {q.query}")
+                    except Exception as e:
+                        logger.error(f"✗ Search failed for '{q.query}': {e}")
+            finally:
+                executor.shutdown(wait=True)
+        
+        logger.info(f"Parallel search complete: {len(all_results)} results across {len(plan.search_queries)} queries")
+        return all_results
+
+    def _search_sequential(self, plan: ResearchPlan, search_type: str) -> List[SearchResult]:
+        """Execute search queries sequentially (existing behavior)."""
+        all_results: List[SearchResult] = []
         for i, search_query in enumerate(plan.search_queries):
             logger.info(f"Query {i+1}/{len(plan.search_queries)}: {search_query.query}")
-            
             try:
-                # Execute search using configured provider
-                # Execute search
                 results = self._execute_search(
                     query=search_query.query,
                     search_type=search_type,
-                    num_results=self.config.search_results_per_query
+                    num_results=self.config.search_results_per_query,
                 )
-                # Post-filter excluded domains
                 results = self._filter_excluded_results(results)
-                
                 logger.info(f"Found {len(results)} results for query: {search_query.query}")
                 all_results.extend(results)
-                
             except Exception as e:
                 logger.error(f"Error executing search '{search_query.query}': {e}")
                 continue
-        
-        logger.info(f"Research complete: found {len(all_results)} total results")
+        logger.info(f"Sequential search complete: {len(all_results)} total results")
         return all_results
+
+    def _execute_search_safe(self, query: str, search_type: str, num_results: int) -> List[SearchResult]:
+        """Safely execute a single search (returns empty list on failure)."""
+        try:
+            results = self._execute_search(query, search_type, num_results)
+            return self._filter_excluded_results(results)
+        except Exception as e:
+            logger.error(f"Search failed for '{query}': {e}")
+            return []
+        
     
     def _select_search_type(self, intent: Intent) -> str:
         """

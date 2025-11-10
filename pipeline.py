@@ -60,6 +60,7 @@ class ResearchPipeline:
         
         # Initialize scraper (content extraction)
         self.scraper = Scraper(
+            max_workers=config.scrape_parallel,  # from config
             output_format=config.output_format,
             preserve_tables=config.preserve_tables,
         )
@@ -69,6 +70,7 @@ class ResearchPipeline:
             llm_client=self.llm_client,
             default_model=config.mrs_model_default,
             model_selector=config.get_mrs_model_for_content_type,
+            max_workers=config.summary_parallel,  # from config
             enable_table_aware=config.summarizer_enable_table_aware,
             table_topk_rows=config.summarizer_table_topk_rows,
             table_max_rows_verbatim=config.summarizer_table_max_rows_verbatim,
@@ -131,6 +133,14 @@ class ResearchPipeline:
             logger.info("Claim verification disabled")
         
         logger.info("Research pipeline initialized")
+        
+        # Rate limit awareness warning for high summarization parallelism
+        if self.config.summary_parallel > 4:
+            logger.warning(
+                f"SUMMARY_PARALLEL is set to {self.config.summary_parallel}. "
+                f"This makes {self.config.summary_parallel} concurrent LLM API calls. "
+                f"If you see 429 (Too Many Requests) errors, reduce SUMMARY_PARALLEL."
+            )
     
     def run(self, query_text: str) -> Report:
         """Run the complete research pipeline with iterative refinement."""

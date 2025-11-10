@@ -190,7 +190,28 @@ ENABLE_TABLE_AWARE=true     # Enable table-aware preprocessing
 TABLE_TOPK_ROWS=10          # Rows to keep for large tables (set higher for more)
 TABLE_MAX_ROWS_VERBATIM=15  # Preserve small tables at or below this row count
 TABLE_MAX_COLS_VERBATIM=8   # Preserve small tables at or below this column count
+
+# Parallelization Configuration
+# Control concurrent operations to balance speed vs rate limits
+# Set to 1 to disable parallelization for that stage
+
+# Search: Concurrent search queries (default: 1)
+SEARCH_PARALLEL=2
+
+# Scraping: Concurrent scrape operations (default: 5)
+SCRAPE_PARALLEL=5
+
+# Summarization: Concurrent LLM calls (default: 1)
+SUMMARY_PARALLEL=2
 ```
+
+## Parallelization: Cost vs Speed vs Rate Limits
+
+- Same tokens = same cost, regardless of parallelization level.
+- Higher parallelization reduces wall-clock time but may trigger API rate limits (HTTP 429).
+- Start conservatively (SEARCH_PARALLEL=2, SCRAPE_PARALLEL=5, SUMMARY_PARALLEL=2); increase gradually.
+
+If you encounter 429 errors, reduce the corresponding parallel setting or upgrade your API tier.
 
 ## Usage
 

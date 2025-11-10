@@ -46,6 +46,9 @@ class Config:
     embedding_model: str
     embedding_url: str
     embedding_api_key: Optional[str]
+
+    # Domain exclusions (optional)
+    exclude_domains: List[str]
     
     # Reranker Configuration
     reranker_url: Optional[str]
@@ -82,6 +85,11 @@ class Config:
     summarizer_table_max_rows_verbatim: int
     summarizer_table_max_cols_verbatim: int
     
+    # Parallelization Configuration
+    search_parallel: int      # Number of concurrent search queries
+    scrape_parallel: int      # Number of concurrent scraping operations
+    summary_parallel: int     # Number of concurrent summarization tasks
+    
     @classmethod
     def from_env(cls, env_file: Optional[str] = None) -> "Config":
         """Load configuration from environment variables."""
@@ -100,6 +108,28 @@ class Config:
         # Helper to get optional env var with default
         def get_optional(key: str, default: str) -> str:
             return os.getenv(key, default)
+        
+        # Helper for parsing and validating parallel settings
+        def get_parallel_setting(key: str, default: str) -> int:
+            """Parse and validate parallel setting."""
+            val_str = os.getenv(key, default)
+            try:
+                val = int(val_str)
+                if val < 1:
+                    raise ValueError(f"{key} must be at least 1, got {val}")
+                if val > 32:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        f"{key} is set to {val}, which is very high. "
+                        f"This may cause resource exhaustion or rate limiting."
+                    )
+                return val
+            except (ValueError, TypeError) as e:
+                raise ValueError(
+                    f"Invalid value for {key}: '{val_str}'. "
+                    f"Must be a positive integer (1-32 recommended). Error: {e}"
+                )
         
         # Parse excluded domains (comma-separated)
         exclude_domains_env = os.getenv("EXCLUDE_DOMAINS", "")
@@ -165,6 +195,11 @@ class Config:
             summarizer_table_topk_rows=int(get_optional("TABLE_TOPK_ROWS", "10")),
             summarizer_table_max_rows_verbatim=int(get_optional("TABLE_MAX_ROWS_VERBATIM", "15")),
             summarizer_table_max_cols_verbatim=int(get_optional("TABLE_MAX_COLS_VERBATIM", "8")),
+            
+            # Parallelization settings with validation
+            search_parallel=get_parallel_setting("SEARCH_PARALLEL", "1"),
+            scrape_parallel=get_parallel_setting("SCRAPE_PARALLEL", "5"),  # Match current default
+            summary_parallel=get_parallel_setting("SUMMARY_PARALLEL", "1"),
         )
     
     def get_mrs_model_for_content_type(self, content_type: str) -> str:
