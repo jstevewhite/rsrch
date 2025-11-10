@@ -28,6 +28,11 @@ class Planner:
         
         prompt = f"""You are a research planner. Given a user query and its intent, create a comprehensive research plan.
 
+Operational rules:
+- Do not mention knowledge cutoff or browsing limitations.
+- Assume web search will be performed; prefer recent sources for time-sensitive topics.
+- When relevant, generate queries targeting fresh info (e.g., "last 7 days", years like 2024/2025, site filters).
+
 Query: "{query.text}"
 Intent: {intent_str}
 
@@ -45,14 +50,14 @@ Consider:
 - For RESEARCH intent: include academic sources and in-depth analysis
 
 Respond with a JSON object:
-{{
+{
   "sections": ["Section 1 title", "Section 2 title", ...],
   "search_queries": [
-    {{"query": "search query 1", "purpose": "what this query aims to find", "priority": 1}},
-    {{"query": "search query 2", "purpose": "what this query aims to find", "priority": 2}}
+    {"query": "search query 1", "purpose": "what this query aims to find", "priority": 1},
+    {"query": "search query 2", "purpose": "what this query aims to find", "priority": 2}
   ],
   "rationale": "Explanation of the research approach"
-}}
+}
 
 Priority is 1 (highest) to 5 (lowest).
 """

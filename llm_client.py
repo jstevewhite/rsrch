@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import time
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Union
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
@@ -13,7 +13,10 @@ logger = logging.getLogger(__name__)
 class LLMClient:
     """Client for interacting with LLMs."""
     
-    def __init__(self, api_key: str, api_endpoint: str, default_model: str, max_retries: int = 3):
+    # Global prompt policy to prevent knowledge cutoff refusals
+    GLOBAL_POLICY = """You have tool access for web search and scraping. Do not rely on your pretraining knowledge for time-sensitive topics. Never refuse or defer based on a model knowledge cutoff. For any question that could involve recent or evolving info, always perform web search and cite sources with dates. If no sources are found after searching, say "No current sources found" and suggest follow-up queries. Never claim "information won't exist because the date is in the future."""
+    
+    def __init__(self, api_key: str, api_endpoint: str, default_model: str, max_retries: int = 3, enable_policy: bool = True):
         """Initialize the LLM client.
         
         Args:
@@ -25,11 +28,12 @@ class LLMClient:
         self.client = OpenAI(api_key=api_key, base_url=api_endpoint)
         self.default_model = default_model
         self.max_retries = max_retries
-        logger.info(f"Initialized LLM client with endpoint: {api_endpoint}, max_retries: {max_retries}")
+        self.enable_policy = enable_policy
+        logger.info(f"Initialized LLM client with endpoint: {api_endpoint}, max_retries: {max_retries}, policy: {enable_policy}")
     
     def complete(
         self,
-        prompt: str,
+        prompt: Union[str, List[Dict[str, str]]],
         model: Optional[str] = None,
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
@@ -38,7 +42,20 @@ class LLMClient:
         """Generate a completion from the LLM."""
         model = model or self.default_model
         
-        messages = [{"role": "user", "content": prompt}]
+        # Handle both string prompts and message arrays
+        if isinstance(prompt, str):
+            if self.enable_policy:
+                # Prepend global policy to prevent knowledge cutoff refusals
+                final_prompt = f"{self.GLOBAL_POLICY}\n\nTask:\n{prompt}"
+            else:
+                final_prompt = prompt
+            messages = [{"role": "user", "content": final_prompt}]
+        else:
+            # User provided message array - use as-is but optionally inject policy
+            messages = prompt
+            if self.enable_policy and not any(msg.get("role") == "system" for msg in messages):
+                # No system message found - inject policy as system message
+                messages = [{"role": "system", "content": self.GLOBAL_POLICY}] + messages
         
         kwargs = {
             "model": model,
@@ -53,10 +70,21 @@ class LLMClient:
             kwargs["response_format"] = {"type": "json_object"}
         
         try:
-            logger.debug(f"Calling {model} with prompt length: {len(prompt)}")
+            prompt_len = len(prompt) if isinstance(prompt, str) else sum(len(msg.get("content", "")) for msg in prompt)
+            logger.debug(f"Calling {model} with prompt length: {prompt_len}")
             response = self.client.chat.completions.create(**kwargs)
             content = response.choices[0].message.content
             logger.debug(f"Received response length: {len(content)}")
+            
+            # Optional: Detect refusals and auto-retry with stricter reminder
+            if self.enable_policy and self._detect_refusal(content):
+                logger.warning("Detected knowledge cutoff refusal, retrying with stricter reminder")
+                retry_prompt = f"{self.GLOBAL_POLICY}\n\nSTRICT RULE: Never mention knowledge cutoff. Use web search.\n\nTask:\n{prompt if isinstance(prompt, str) else 'Previous task'}"
+                kwargs["messages"] = [{"role": "user", "content": retry_prompt}]
+                response = self.client.chat.completions.create(**kwargs)
+                content = response.choices[0].message.content
+                logger.info("Successfully retried after refusal detection")
+            
             return content
         except Exception as e:
             logger.error(f"Error calling LLM: {e}")
@@ -190,6 +218,20 @@ class LLMClient:
                 logger.debug("Cleaned response parse failed")
         
         return None
+    
+    def _detect_refusal(self, response: str) -> bool:
+        """Detect if the model refused based on knowledge cutoff."""
+        refusal_patterns = [
+            r"knowledge cutoff",
+            r"cannot browse",
+            r"as an ai",
+            r"training data.*cutoff",
+            r"information.*won't exist.*future",
+            r"cannot access.*recent",
+            r"training.*ends.*in"
+        ]
+        
+        return any(re.search(pattern, response, re.IGNORECASE) for pattern in refusal_patterns)
     
     def embed(self, texts: List[str], model: Optional[str] = None) -> List[List[float]]:
         """Generate embeddings for the given texts."""

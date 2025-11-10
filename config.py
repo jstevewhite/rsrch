@@ -64,6 +64,9 @@ class Config:
     verify_model: str  # Model to use for claim verification
     verify_confidence_threshold: float  # Minimum confidence for flagging
     
+    # Prompt Policy Configuration
+    prompt_policy_include: bool  # Enable global prompt policy to prevent knowledge cutoff refusals
+    
     # Output Configuration
     output_dir: Path
     log_level: str
@@ -146,6 +149,8 @@ class Config:
             verify_claims=get_optional("VERIFY_CLAIMS", "false").lower() in ("true", "1", "yes"),
             verify_model=get_optional("VERIFY_MODEL", "gpt-4o-mini"),
             verify_confidence_threshold=float(get_optional("VERIFY_CONFIDENCE_THRESHOLD", "0.7")),
+            
+            prompt_policy_include=get_optional("PROMPT_POLICY_INCLUDE", "true").lower() in ("true", "1", "yes"),
             
             output_dir=Path(get_optional("OUTPUT_DIR", "./reports")),
             log_level=get_optional("LOG_LEVEL", "INFO"),

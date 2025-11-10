@@ -41,6 +41,7 @@ class ResearchPipeline:
             api_endpoint=config.api_endpoint,
             default_model=config.default_model,
             max_retries=config.llm_max_retries,
+            enable_policy=config.prompt_policy_include,
         )
         
         # Initialize stages
