@@ -50,14 +50,14 @@ Consider:
 - For RESEARCH intent: include academic sources and in-depth analysis
 
 Respond with a JSON object:
-{
+{{
   "sections": ["Section 1 title", "Section 2 title", ...],
   "search_queries": [
-    {"query": "search query 1", "purpose": "what this query aims to find", "priority": 1},
-    {"query": "search query 2", "purpose": "what this query aims to find", "priority": 2}
+    {{"query": "search query 1", "purpose": "what this query aims to find", "priority": 1}},
+    {{"query": "search query 2", "purpose": "what this query aims to find", "priority": 2}}
   ],
   "rationale": "Explanation of the research approach"
-}
+}}
 
 Priority is 1 (highest) to 5 (lowest).
 """
