@@ -2,10 +2,19 @@
 
 A modular, configurable CLI tool for automated research report generation using LLMs.
 
-## What's New
-- SQLite vector search in ContextAssembler now uses DB-based top-k cosine similarity via a registered cosine_sim() SQL function; automatically falls back to in-memory similarity when the database has no embeddings.
-- EXCLUDE_DOMAINS is applied across providers (SERP/Perplexity via -site:domain, Tavily via request payload) and results are post-filtered by domain. Default example excludes YouTube.
-- Tests: added HTML→Markdown table conversion test for the scraper and strengthened large-table summarizer tests to assert computed aggregates.
+## What's New (v1.1 - Feb 2026)
+
+**Major Enhancements:**
+- **Scraped Content Caching**: Full web pages now stored in SQLite database for faster verification and future interactive queries
+- **Improved Verification**: Multi-source claim support, better JSON parsing, 3-tier content lookup (memory → DB → scrape)
+- **Enhanced Logging**: Colored console output (errors in red), detailed LLM call tracking with model/prompt/response metadata
+- **Better Model Compatibility**: Text completion fallback for models with poor JSON mode support (kimi-k2.5, gpt-oss-120b)
+- **Comprehensive Documentation**: CLAUDE.md added with architecture guide, troubleshooting, and development patterns
+
+**Previous Updates:**
+- SQLite vector search in ContextAssembler now uses DB-based top-k cosine similarity via a registered cosine_sim() SQL function; automatically falls back to in-memory similarity when the database has no embeddings
+- EXCLUDE_DOMAINS is applied across providers (SERP/Perplexity via -site:domain, Tavily via request payload) and results are post-filtered by domain. Default example excludes YouTube
+- Tests: added HTML→Markdown table conversion test for the scraper and strengthened large-table summarizer tests to assert computed aggregates
 
 ## Notes
 
@@ -61,7 +70,7 @@ There's a BeautifulSoup scraper; if it fails, it tries Jina.ai, if that fails, i
 
 ✅ **Reflection & Iteration**: Validates completeness and performs additional research if needed
 
-✅ **Claim Verification**: Optional fact-checking of report claims (experimental)
+✅ **Claim Verification**: Optional fact-checking with multi-source claim support and persistent content caching
 
 ✅ **Configurable Models**: Use different LLMs for each stage via configuration
 
@@ -69,25 +78,33 @@ There's a BeautifulSoup scraper; if it fails, it tries Jina.ai, if that fails, i
 
 🚧 **Advanced Features**:
 
-- Vector database storage (SQLite + VSS) for semantic search
+- Vector database storage (SQLite + VSS) for semantic search and scraped content caching
 - Search result reranking for improved relevance
 - Iterative research refinement based on reflection
 - Multi-source claim verification with confidence scoring
+- Persistent content cache enabling future interactive Q&A features
 
 ## Architecture
 
-The pipeline consists of 10 stages:
+The pipeline consists of 10 stages with iterative refinement:
 
 1. **Query Parsing**: Accept and parse user query
-2. **Intent Classification**: Identify query intent
+2. **Intent Classification**: Identify query intent (informational, news, code, research, etc.)
 3. **Planning**: Design research approach and queries
 4. **Research**: Execute web searches and gather results
-5. **Scraping**: Extract and chunk content from URLs
+5. **Scraping**: Extract and chunk content from URLs (cached in database for reuse)
 6. **Summarization**: Generate summaries with citations
-7. **Context Assembly**: Build context package with vector similarity
-8. **Reflection**: Validate completeness and identify gaps
+7. **Context Assembly**: Build context package with vector similarity ranking
+8. **Reflection**: Validate completeness and identify gaps (may loop back to stage 4)
 9. **Report Generation**: Create final report with citations
-10. **Claim Verification**: Optional fact-checking (experimental)
+10. **Claim Verification**: Optional fact-checking using cached content (recommended: use gpt-4o-mini)
+
+**Database Storage:**
+- `summaries` table: Summarized content with metadata
+- `embeddings` table: Vector embeddings for semantic search
+- `scraped_content` table: Full web page content for verification and future interactive features
+
+**Iterative Research Loop:** Stages 4-8 can repeat up to MAX_ITERATIONS times if reflection identifies gaps.
 
 ## Installation
 
@@ -172,8 +189,9 @@ Vector search notes: ContextAssembler now performs top-k retrieval directly in S
 
 # Verification Configuration (Optional - adds ~30-60s and ~$0.04-0.05 per report)
 # VERIFY_CLAIMS=true  # Enable claim verification stage
-# VERIFY_MODEL=gpt-4o-mini  # Model for verification (cheap is fine)
+# VERIFY_MODEL=gpt-4o-mini  # Model for verification (RECOMMENDED: use gpt-4o-mini, not gpt-oss-120b)
 # VERIFY_CONFIDENCE_THRESHOLD=0.7  # Flag claims below this confidence
+# Note: Scraped content is cached in database, so re-running verification is fast
 
 # Output Configuration
 OUTPUT_DIR=./reports
@@ -349,7 +367,7 @@ Notes:
 
 ## Development Status
 
-### Current Status (v1.0)
+### Current Status (v1.1 - Feb 2026)
 
 - ✅ Configuration system
 - ✅ LLM client (OpenAI compatible)
@@ -362,7 +380,7 @@ Notes:
 - ✅ Context assembly with semantic search
 - ✅ Reflection and iterative refinement
 - ✅ Report generation with comprehensive citations
-- ✅ Optional claim verification
+- ✅ Claim verification with database content caching
 - ✅ CLI interface with logging
 - ✅ Comprehensive error handling
 
@@ -370,9 +388,11 @@ Notes:
 
 - **Search Reranking**: Improves result relevance using semantic similarity
 - **Iterative Research**: Automatically performs additional research if gaps are identified
-- **Claim Verification**: Fact-checks report claims against source material
+- **Claim Verification**: Fact-checks report claims with multi-source support and database caching
 - **Vector Storage**: Stores content chunks for semantic retrieval
+- **Content Caching**: Persistent database storage of scraped web pages for fast re-verification and interactive queries
 - **Multi-Model Configuration**: Different LLMs for different pipeline stages
+- **Enhanced Observability**: Colored console output and detailed LLM call tracking
 
 ## Advanced Configuration
 
@@ -423,18 +443,30 @@ The pipeline can perform multiple research iterations:
   - `TABLE_TOPK_ROWS` set to desired number (e.g., 100)
 - The pipeline now reads these from `.env` and passes them into the summarizer.
 
-### Verification Notes (composite claims)
-- If a sentence combines multiple facts (e.g., classification + counts), attach multiple citations so each part is supported (e.g., [Source 3][Source 7]).
-- Prefer splitting into two sentences when possible for easier verification and clearer sourcing.
-- The verifier will be stricter if only one citation is provided but both parts are asserted; include the missing source to avoid false negatives.
-- Optional: Configure `SERPER_API_KEY` or `JINA_API_KEY` for fallback scraping
-- Check `research_pipeline.log` for detailed error messages
+### Verification Best Practices
+
+**Model Selection:**
+- Use `VERIFY_MODEL=gpt-4o-mini` (recommended) - reliable JSON output
+- Avoid `gpt-oss-120b` for verification - produces malformed JSON responses
+- `kimi-k2.5` works but may truncate long responses
+
+**Composite Claims:**
+- If a sentence combines multiple facts (e.g., classification + counts), attach multiple citations so each part is supported (e.g., [Source 3][Source 7])
+- Prefer splitting into two sentences when possible for easier verification and clearer sourcing
+- The verifier now supports multi-source claims but each source must contain the relevant part
+
+**Performance:**
+- Scraped content is cached in database - first verification is slow, subsequent runs are fast
+- Content persists across pipeline runs for quick re-verification
+- Database cache also enables future interactive Q&A features
 
 ### Logging
 
-- Check `research_pipeline.log` for detailed error messages
-- Use `--log-level DEBUG` for verbose output
-- Monitor scraping fallback usage and costs
+- **Console output**: Colored logs (errors in red, warnings in yellow, info in green)
+- **Log file**: `research_pipeline.log` contains detailed execution history
+- **LLM tracking**: Every LLM call shows model name, prompt size, temperature, json_mode, and response length
+- **Debug mode**: Use `--log-level DEBUG` for verbose output including response previews
+- Monitor scraping fallback usage and costs in the logs
 
 ## Contributing
 
