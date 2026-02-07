@@ -19,10 +19,12 @@ from .stages import (
     RerankerClient,
     SearchResultReranker,
     Reflector,
+    GapValidator,
     ClaimExtractor,
     ClaimVerifier,
     VerificationReporter,
 )
+from .stages.content_detector import SourceTier
 
 logger = logging.getLogger(__name__)
 
@@ -110,9 +112,25 @@ class ResearchPipeline:
             llm_client=self.llm_client,
             model=config.reflection_model,
         )
-        
+
+        # Initialize gap validator (post-report gap check)
+        if config.validate_gaps:
+            self.gap_validator = GapValidator(
+                llm_client=self.llm_client,
+                model=config.reflection_model,
+            )
+        else:
+            self.gap_validator = None
+            logger.info("Post-report gap validation disabled")
+
         # Initialize verification components (optional)
         if config.verify_claims:
+            tier_weights = {
+                SourceTier.TIER_1: config.verify_tier_1_weight,
+                SourceTier.TIER_2: config.verify_tier_2_weight,
+                SourceTier.TIER_3: config.verify_tier_3_weight,
+                SourceTier.TIER_4: config.verify_tier_4_weight,
+            }
             self.claim_extractor = ClaimExtractor(
                 llm_client=self.llm_client,
                 model=config.verify_model,
@@ -122,11 +140,13 @@ class ResearchPipeline:
                 scraper=self.scraper,
                 model=config.verify_model,
                 vector_store=self.vector_store,
+                tier_weights=tier_weights,
             )
             self.verification_reporter = VerificationReporter(
                 confidence_threshold=config.verify_confidence_threshold,
             )
             logger.info(f"Claim verification enabled with model: {config.verify_model}")
+            logger.info(f"Source tier weights: T1={config.verify_tier_1_weight}, T2={config.verify_tier_2_weight}, T3={config.verify_tier_3_weight}, T4={config.verify_tier_4_weight}")
         else:
             self.claim_extractor = None
             self.claim_verifier = None
@@ -330,7 +350,34 @@ class ResearchPipeline:
         # Stage 9: Generate report
         logger.info("Stage 9: Generating report...")
         report = self._generate_report(query, plan, final_summaries, final_reflection)
-        
+
+        # Stage 9.5: Validate declared gaps against actual report content
+        if (self.gap_validator
+            and final_reflection
+            and not final_reflection.is_complete
+            and final_reflection.missing_information):
+            logger.info("Stage 9.5: Validating declared research gaps...")
+            try:
+                validated_gaps = self.gap_validator.validate_gaps(
+                    report_content=report.content,
+                    declared_gaps=final_reflection.missing_information,
+                    query=query,
+                )
+                original_count = len(final_reflection.missing_information)
+                report.metadata["missing_information"] = validated_gaps
+                report.metadata["original_gap_count"] = original_count
+                report.metadata["validated_gap_count"] = len(validated_gaps)
+
+                if not validated_gaps:
+                    report.metadata["research_complete"] = True
+                    report.metadata["status"] = "complete"
+                    logger.info(f"All {original_count} declared gaps are addressed in the report -- upgrading status to complete")
+                else:
+                    logger.info(f"Gap validation: {original_count - len(validated_gaps)}/{original_count} gaps addressed, {len(validated_gaps)} remain")
+            except Exception as e:
+                logger.error(f"Gap validation failed: {e}")
+                logger.warning("Continuing with original gap list")
+
         # Stage 10: Verify claims (OPTIONAL)
         if self.config.verify_claims and self.claim_extractor:
             logger.info("Stage 10: Verifying claims...")

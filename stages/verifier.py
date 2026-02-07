@@ -12,6 +12,7 @@ from ..models import (
 )
 from ..llm_client import LLMClient
 from .scraper import Scraper
+from .content_detector import SourceTierClassifier, SourceTier
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +264,7 @@ IMPORTANT:
 
 class ClaimVerifier:
     """Verify claims against source content."""
-    
+
     # Model context limits (approximate, in characters)
     MODEL_CONTEXT_LIMITS = {
         "gpt-4o-mini": 500000,  # ~128K tokens
@@ -271,28 +272,39 @@ class ClaimVerifier:
         "gpt-4": 320000,  # ~80K tokens
         "default": 300000,  # Conservative default
     }
-    
+
+    # Default confidence multipliers per source tier
+    DEFAULT_TIER_WEIGHTS = {
+        SourceTier.TIER_1: 1.0,   # Authoritative: no adjustment
+        SourceTier.TIER_2: 0.95,  # Professional: slight reduction
+        SourceTier.TIER_3: 0.85,  # Community: moderate reduction
+        SourceTier.TIER_4: 0.75,  # Unvetted: significant reduction
+    }
+
     @staticmethod
     def _get_current_date_context() -> str:
         """Get current date context for verification prompt."""
         from datetime import datetime
         now = datetime.now()
         return f"{now.strftime('%B %d, %Y')} ({now.year})"
-    
-    def __init__(self, llm_client: LLMClient, scraper: Scraper, model: str, vector_store=None):
+
+    def __init__(self, llm_client: LLMClient, scraper: Scraper, model: str,
+                 vector_store=None, tier_weights: Optional[Dict] = None):
         """
         Initialize claim verifier.
-        
+
         Args:
             llm_client: LLM client for verification
             scraper: Scraper for re-fetching source content
             model: Model to use for verification
             vector_store: Optional vector store for accessing cached scraped content
+            tier_weights: Optional dict mapping SourceTier to confidence multiplier
         """
         self.llm_client = llm_client
         self.scraper = scraper
         self.model = model
         self.vector_store = vector_store
+        self.tier_weights = tier_weights or self.DEFAULT_TIER_WEIGHTS
     
     def verify_all_sources(
         self,
@@ -335,9 +347,15 @@ class ClaimVerifier:
         Returns:
             List of verification results
         """
+        # Classify source tier for confidence weighting
+        source_tier = SourceTierClassifier.classify(source_url)
+        tier_weight = self.tier_weights.get(source_tier, 0.75)
+        if tier_weight < 1.0:
+            logger.debug(f"Source tier: {source_tier.value} (weight={tier_weight}) for {source_url}")
+
         # Step 1: Get source content (from cache, DB, or scrape)
         scraped = None
-        
+
         # Try in-memory cache first
         if scraped_cache and source_url in scraped_cache:
             scraped = scraped_cache[source_url]
@@ -357,7 +375,7 @@ class ClaimVerifier:
                     metadata=db_content['metadata'],
                     retrieved_at=datetime.fromisoformat(db_content['scraped_at']) if db_content.get('scraped_at') else datetime.now()
                 )
-        
+
         # Fall back to scraping
         if not scraped:
             logger.debug(f"Re-scraping {source_url} (not in cache or DB)...")
@@ -365,11 +383,11 @@ class ClaimVerifier:
                 scraped = self.scraper.scrape_url(source_url)
             except Exception as e:
                 logger.error(f"Error scraping {source_url}: {e}")
-                return self._mark_unverifiable(claims, f"Scraping error: {str(e)}")
+                return self._mark_unverifiable(claims, f"Scraping error: {str(e)}", source_url=source_url)
 
         if not scraped or not scraped.content:
             logger.warning(f"Failed to scrape {source_url}")
-            return self._mark_unverifiable(claims, "Source unavailable or empty")
+            return self._mark_unverifiable(claims, "Source unavailable or empty", source_url=source_url)
         
         # Step 2: Check content length and truncate if needed
         source_text = self._prepare_source_content(scraped.content)
@@ -458,7 +476,7 @@ GUIDELINES:
         # Step 4: Get verification results
         try:
             logger.debug(f"Verification prompt length: {len(prompt)} chars for {len(claims)} claims")
-            
+
             # Use complete_json which has better retry and parsing logic
             try:
                 response = self.llm_client.complete_json(
@@ -477,13 +495,13 @@ GUIDELINES:
                     temperature=0.1,
                     max_tokens=2000,
                 )
-                
+
                 if not text_response or not text_response.strip():
                     logger.error("Empty response from model")
-                    return self._mark_unverifiable(claims, "Model returned empty response")
-                
+                    return self._mark_unverifiable(claims, "Model returned empty response", source_url=source_url)
+
                 logger.debug(f"Text response length: {len(text_response)}, preview: {text_response[:200]}")
-                
+
                 # Parse JSON manually
                 json_str = None
                 code_match = re.search(r'```(?:json)?\s*\n(.*?)\n```', text_response, re.DOTALL)
@@ -493,11 +511,11 @@ GUIDELINES:
                     obj_match = re.search(r'(\{[\s\S]*\})', text_response)
                     if obj_match:
                         json_str = obj_match.group(1).strip()
-                
+
                 if not json_str:
                     logger.error(f"No JSON found in response")
-                    return self._mark_unverifiable(claims, "No JSON in response")
-                
+                    return self._mark_unverifiable(claims, "No JSON in response", source_url=source_url)
+
                 try:
                     response = json.loads(json_str)
                 except json.JSONDecodeError as e:
@@ -509,24 +527,48 @@ GUIDELINES:
                             logger.info("Parsed truncated JSON")
                         except:
                             logger.error(f"JSON parse failed: {e}")
-                            return self._mark_unverifiable(claims, f"JSON parse error: {e}")
+                            return self._mark_unverifiable(claims, f"JSON parse error: {e}", source_url=source_url)
                     else:
                         logger.error(f"JSON parse failed: {e}")
-                        return self._mark_unverifiable(claims, f"JSON parse error: {e}")
-            
-            return self._parse_verification_response(response, claims)
-            
+                        return self._mark_unverifiable(claims, f"JSON parse error: {e}", source_url=source_url)
+
+            results = self._parse_verification_response(response, claims)
+
+            # Step 5: Apply source tier weighting to confidence scores
+            return self._apply_tier_weighting(results, source_tier, tier_weight)
+
         except Exception as e:
             logger.error(f"Verification failed for {source_url}: {e}")
-            return self._mark_unverifiable(claims, f"Verification error: {str(e)}")
+            return self._mark_unverifiable(claims, f"Verification error: {str(e)}", source_url=source_url)
     
+    def _apply_tier_weighting(
+        self,
+        results: List[VerificationResult],
+        source_tier: SourceTier,
+        tier_weight: float
+    ) -> List[VerificationResult]:
+        """Apply source tier weighting to verification results.
+
+        Args:
+            results: Verification results from LLM
+            source_tier: Classified tier for this source
+            tier_weight: Confidence multiplier for this tier
+
+        Returns:
+            Results with source_tier and adjusted_confidence set
+        """
+        for result in results:
+            result.source_tier = source_tier.value
+            result.adjusted_confidence = result.confidence * tier_weight
+        return results
+
     def _prepare_source_content(self, content: str) -> str:
         """
         Prepare source content, truncating if too large.
-        
+
         Args:
             content: Raw source content
-            
+
         Returns:
             Prepared content (possibly truncated)
         """
@@ -603,18 +645,21 @@ GUIDELINES:
     def _mark_unverifiable(
         self,
         claims: List[ExtractedClaim],
-        reason: str
+        reason: str,
+        source_url: Optional[str] = None
     ) -> List[VerificationResult]:
         """
         Mark all claims as unverifiable.
-        
+
         Args:
             claims: List of claims
             reason: Reason they couldn't be verified
-            
+            source_url: Optional URL for source tier classification
+
         Returns:
             List of verification results marking all as unverifiable
         """
+        source_tier = SourceTierClassifier.classify(source_url) if source_url else SourceTier.TIER_4
         return [
             VerificationResult(
                 claim=claim,
@@ -622,6 +667,8 @@ GUIDELINES:
                 confidence=0.0,
                 evidence=None,
                 reasoning=f"Cannot verify: {reason}",
+                source_tier=source_tier.value,
+                adjusted_confidence=0.0,
             )
             for claim in claims
         ]
@@ -657,26 +704,44 @@ class VerificationReporter:
             for results in results_by_source.values()
             for result in results
         ]
-        
+
         total = len(all_results)
         supported = sum(1 for r in all_results if r.verdict == "supported")
         partial = sum(1 for r in all_results if r.verdict == "partial")
         unsupported = sum(1 for r in all_results if r.verdict == "unsupported")
         contradicted = sum(1 for r in all_results if r.verdict == "contradicted")
-        
-        # Flag problematic claims
+
+        # Flag problematic claims (use adjusted_confidence when available)
         flagged = [
             result for result in all_results
             if result.verdict in ["unsupported", "contradicted", "partial"]
-               or result.confidence < self.confidence_threshold
+               or (result.adjusted_confidence if result.adjusted_confidence is not None
+                   else result.confidence) < self.confidence_threshold
         ]
-        
-        # Calculate average confidence
+
+        # Identify claims only backed by low-tier sources (Tier 3/4)
+        low_tier_only = [
+            r for r in all_results
+            if r.source_tier in ("tier_3", "tier_4")
+            and r.verdict == "supported"
+            and not r.claim.additional_sources
+        ]
+        if low_tier_only:
+            logger.info(f"Found {len(low_tier_only)} supported claims relying solely on low-tier sources")
+
+        # Track source tier distribution
+        tier_dist = {}
+        for r in all_results:
+            tier = r.source_tier or "unknown"
+            tier_dist[tier] = tier_dist.get(tier, 0) + 1
+
+        # Calculate average confidence (use adjusted when available)
         avg_confidence = (
-            sum(r.confidence for r in all_results) / total
+            sum(r.adjusted_confidence if r.adjusted_confidence is not None
+                else r.confidence for r in all_results) / total
             if total > 0 else 0.0
         )
-        
+
         return VerificationSummary(
             total_claims=total,
             supported_claims=supported,
@@ -686,6 +751,8 @@ class VerificationReporter:
             flagged_claims=flagged,
             avg_confidence=avg_confidence,
             by_source=results_by_source,
+            low_tier_only_claims=low_tier_only,
+            tier_distribution=tier_dist,
         )
     
     def create_appendix(self, summary: VerificationSummary) -> str:
@@ -712,32 +779,83 @@ class VerificationReporter:
         if summary.flagged_claims:
             lines.append("## Flagged Claims\n")
             lines.append(f"The following {len(summary.flagged_claims)} claims require attention:\n")
-            
+
             for i, result in enumerate(summary.flagged_claims, 1):
                 icon = self._get_verdict_icon(result.verdict)
                 lines.append(f"### {icon} Claim {i}: {result.verdict.upper()}\n")
                 lines.append(f"**Claim**: \"{result.claim.text}\"\n")
                 lines.append(f"- **Source**: {result.claim.source_url}")
-                lines.append(f"- **Confidence**: {result.confidence:.2f}")
+                conf_str = f"{result.confidence:.2f}"
+                if result.adjusted_confidence is not None and result.adjusted_confidence != result.confidence:
+                    conf_str += f" (adjusted: {result.adjusted_confidence:.2f})"
+                lines.append(f"- **Confidence**: {conf_str}")
+                if result.source_tier:
+                    lines.append(f"- **Source Tier**: {result.source_tier}")
                 lines.append(f"- **Reasoning**: {result.reasoning}")
                 if result.evidence:
                     lines.append(f"- **Evidence**: \"{result.evidence}\"")
                 lines.append("")
-        
+
+        # Low-tier-only claims warning
+        if summary.low_tier_only_claims:
+            lines.append("## Low Authority Source Claims\n")
+            lines.append(f"The following {len(summary.low_tier_only_claims)} supported claims "
+                        f"rely solely on community or unvetted sources:\n")
+            tier_labels = {
+                "tier_3": "Community",
+                "tier_4": "Unvetted",
+            }
+            for i, result in enumerate(summary.low_tier_only_claims, 1):
+                tier_label = tier_labels.get(result.source_tier, "Unknown")
+                lines.append(f"{i}. \"{result.claim.text}\"")
+                lines.append(f"   - Source tier: {tier_label} ({result.source_tier})")
+                lines.append(f"   - Source: {result.claim.source_url}")
+                if result.adjusted_confidence is not None:
+                    lines.append(f"   - Adjusted confidence: {result.adjusted_confidence:.2f}")
+                lines.append("")
+
+        # Source tier distribution
+        if summary.tier_distribution:
+            tier_labels = {
+                "tier_1": "Authoritative (peer-reviewed, government)",
+                "tier_2": "Professional (major news, official docs)",
+                "tier_3": "Community (wikis, forums, UGC)",
+                "tier_4": "Unvetted (unknown/unclassified)",
+            }
+            lines.append("## Source Tier Distribution\n")
+            for tier in ["tier_1", "tier_2", "tier_3", "tier_4"]:
+                count = summary.tier_distribution.get(tier, 0)
+                if count > 0:
+                    label = tier_labels.get(tier, tier)
+                    lines.append(f"- **{tier.upper()}** ({label}): {count} claims")
+            unknown_count = summary.tier_distribution.get("unknown", 0)
+            if unknown_count > 0:
+                lines.append(f"- **Unknown**: {unknown_count} claims")
+            lines.append("")
+
         # By-source breakdown
         lines.append("## By-Source Analysis\n")
         for url, results in summary.by_source.items():
             total_for_source = len(results)
             supported_for_source = sum(1 for r in results if r.verdict == "supported")
-            flagged_for_source = sum(1 for r in results if r.verdict in ["unsupported", "contradicted", "partial"] or r.confidence < self.confidence_threshold)
-            avg_conf_for_source = sum(r.confidence for r in results) / total_for_source if total_for_source > 0 else 0.0
-            
+            flagged_for_source = sum(1 for r in results
+                                     if r.verdict in ["unsupported", "contradicted", "partial"]
+                                     or (r.adjusted_confidence if r.adjusted_confidence is not None
+                                         else r.confidence) < self.confidence_threshold)
+            avg_conf_for_source = (
+                sum(r.adjusted_confidence if r.adjusted_confidence is not None
+                    else r.confidence for r in results) / total_for_source
+                if total_for_source > 0 else 0.0
+            )
+            source_tier = results[0].source_tier if results and results[0].source_tier else "unknown"
+
             lines.append(f"**Source**: {url}")
+            lines.append(f"- Tier: {source_tier}")
             lines.append(f"- Claims verified: {total_for_source}")
             lines.append(f"- Supported: {supported_for_source} ({self._percentage(supported_for_source, total_for_source)}%)")
             lines.append(f"- Flagged: {flagged_for_source}")
             lines.append(f"- Avg confidence: {avg_conf_for_source:.2f}\n")
-        
+
         return "\n".join(lines)
     
     def annotate_report(
@@ -765,6 +883,8 @@ class VerificationReporter:
             "avg_confidence": summary.avg_confidence,
             "flagged_count": len(summary.flagged_claims),
             "verification_pass": len(summary.flagged_claims) == 0,
+            "low_tier_only_count": len(summary.low_tier_only_claims),
+            "tier_distribution": summary.tier_distribution,
         }
         
         # Add appendix

@@ -7,7 +7,7 @@ from .scraper import Scraper
 from .summarizer import Summarizer
 from .context_assembler import ContextAssembler, EmbeddingClient, VectorStore
 from .reranker import RerankerClient, SearchResultReranker
-from .reflector import Reflector
+from .reflector import Reflector, GapValidator
 from .verifier import ClaimExtractor, ClaimVerifier, VerificationReporter
 
 __all__ = [
@@ -22,6 +22,7 @@ __all__ = [
     "RerankerClient",
     "SearchResultReranker",
     "Reflector",
+    "GapValidator",
     "ClaimExtractor",
     "ClaimVerifier",
     "VerificationReporter",
