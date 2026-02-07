@@ -4,12 +4,28 @@ import logging
 import sqlite3
 import requests
 import numpy as np
-from typing import List, Dict, Optional, Tuple
+from contextlib import contextmanager
+from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
 
 from ..models import Summary, ContextPackage, ResearchPlan, Query
 
 logger = logging.getLogger(__name__)
+
+
+# Module-level function for SQLite UDF registration
+def _cosine_sim_sql(emb_blob: bytes, query_blob: bytes, dim: int) -> float:
+    """Cosine similarity function registered as SQLite UDF."""
+    try:
+        a = np.frombuffer(emb_blob, dtype=np.float32, count=dim)
+        b = np.frombuffer(query_blob, dtype=np.float32, count=dim)
+        na = np.linalg.norm(a)
+        nb = np.linalg.norm(b)
+        if na == 0 or nb == 0:
+            return 0.0
+        return float(np.dot(a, b) / (na * nb))
+    except Exception:
+        return 0.0
 
 
 class EmbeddingClient:
@@ -68,28 +84,40 @@ class EmbeddingClient:
     
     def generate_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
         """
-        Generate embeddings for multiple texts.
-        
+        Generate embeddings for multiple texts in a single API call.
+
         Args:
             texts: List of texts to embed
-            
+
         Returns:
-            List of embedding vectors
+            List of embedding vectors (order preserved)
         """
-        # For now, generate one at a time
-        # Could be optimized to use batch API if available
-        embeddings = []
-        for i, text in enumerate(texts):
-            try:
-                logger.debug(f"Generating embedding {i+1}/{len(texts)}")
-                embedding = self.generate_embedding(text)
-                embeddings.append(embedding)
-            except Exception as e:
-                logger.error(f"Failed to generate embedding for text {i}: {e}")
-                # Use zero vector as fallback
-                embeddings.append([0.0] * 1536)  # Assume 1536 dimensions
-        
-        return embeddings
+        if not texts:
+            return []
+
+        url = f"{self.api_url}/embeddings"
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        payload = {"input": texts, "model": self.model}
+
+        try:
+            logger.debug(f"Generating embeddings for {len(texts)} texts in batch")
+            response = requests.post(url, json=payload, headers=headers, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+
+            # Sort by index to guarantee order matches input
+            sorted_data = sorted(data["data"], key=lambda x: x["index"])
+            embeddings = [item["embedding"] for item in sorted_data]
+
+            logger.debug(f"Generated {len(embeddings)} embeddings in batch")
+            return embeddings
+
+        except Exception as e:
+            logger.error(f"Batch embedding generation failed: {e}")
+            raise
 
 
 class VectorStore:
@@ -106,120 +134,201 @@ class VectorStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
     
-    def _connect(self) -> sqlite3.Connection:
-        """Open a connection and register custom SQL functions (e.g., cosine_sim)."""
+    @contextmanager
+    def _connect(self):
+        """Context manager for database connections with auto-close."""
         conn = sqlite3.connect(str(self.db_path))
-        # Register cosine similarity over BLOB embeddings
-        def _cosine_sim_sql(emb_blob: bytes, query_blob: bytes, dim: int) -> float:
-            try:
-                a = np.frombuffer(emb_blob, dtype=np.float32, count=dim)
-                b = np.frombuffer(query_blob, dtype=np.float32, count=dim)
-                na = np.linalg.norm(a)
-                nb = np.linalg.norm(b)
-                if na == 0 or nb == 0:
-                    return 0.0
-                return float(np.dot(a, b) / (na * nb))
-            except Exception:
-                return 0.0
         conn.create_function("cosine_sim", 3, _cosine_sim_sql)
-        return conn
+        try:
+            yield conn
+        finally:
+            conn.close()
     
     def _init_db(self):
         """Initialize database schema."""
-        conn = self._connect()
-        cursor = conn.cursor()
-        
-        # Create summaries table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS summaries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                url TEXT NOT NULL,
-                title TEXT NOT NULL,
-                summary_text TEXT NOT NULL,
-                relevance_score REAL DEFAULT 0.0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Create embeddings table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS embeddings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                summary_id INTEGER NOT NULL,
-                embedding BLOB NOT NULL,
-                dimension INTEGER NOT NULL,
-                FOREIGN KEY (summary_id) REFERENCES summaries(id)
-            )
-        """)
-        
-        conn.commit()
-        conn.close()
+        with self._connect() as conn:
+            cursor = conn.cursor()
+
+            # Create summaries table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS summaries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    url TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    summary_text TEXT NOT NULL,
+                    relevance_score REAL DEFAULT 0.0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Create embeddings table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS embeddings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    summary_id INTEGER NOT NULL,
+                    embedding BLOB NOT NULL,
+                    dimension INTEGER NOT NULL,
+                    FOREIGN KEY (summary_id) REFERENCES summaries(id)
+                )
+            """)
+            
+            # Create scraped content cache table for verification and interactive queries
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS scraped_content (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    url TEXT NOT NULL UNIQUE,
+                    title TEXT,
+                    content TEXT NOT NULL,
+                    metadata TEXT,
+                    scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Create index for fast URL lookups
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scraped_url 
+                ON scraped_content(url)
+            """)
+
+            conn.commit()
         logger.info(f"Vector store initialized at: {self.db_path}")
     
     def store_summaries(self, summaries: List[Summary], embeddings: List[List[float]]) -> List[int]:
         """
         Store summaries and their embeddings.
-        
+
         Args:
             summaries: List of Summary objects
             embeddings: List of embedding vectors
-            
+
         Returns:
             List of summary IDs
         """
-        conn = self._connect()
-        cursor = conn.cursor()
-        
-        summary_ids = []
-        for summary, embedding in zip(summaries, embeddings):
-            # Store summary
-            cursor.execute("""
-                INSERT INTO summaries (url, title, summary_text, relevance_score)
-                VALUES (?, ?, ?, ?)
-            """, (
-                summary.url,
-                summary.citations[0].title if summary.citations else "Unknown",
-                summary.text,
-                summary.relevance_score
-            ))
-            summary_id = cursor.lastrowid
-            summary_ids.append(summary_id)
-            
-            # Store embedding as binary blob
-            embedding_bytes = np.array(embedding, dtype=np.float32).tobytes()
-            dimension = len(embedding)
-            
-            cursor.execute("""
-                INSERT INTO embeddings (summary_id, embedding, dimension)
-                VALUES (?, ?, ?)
-            """, (summary_id, embedding_bytes, dimension))
-        
-        conn.commit()
-        conn.close()
+        with self._connect() as conn:
+            cursor = conn.cursor()
+
+            summary_ids = []
+            for summary, embedding in zip(summaries, embeddings):
+                # Store summary
+                cursor.execute("""
+                    INSERT INTO summaries (url, title, summary_text, relevance_score)
+                    VALUES (?, ?, ?, ?)
+                """, (
+                    summary.url,
+                    summary.citations[0].title if summary.citations else "Unknown",
+                    summary.text,
+                    summary.relevance_score
+                ))
+                summary_id = cursor.lastrowid
+                summary_ids.append(summary_id)
+
+                # Store embedding as binary blob
+                embedding_bytes = np.array(embedding, dtype=np.float32).tobytes()
+                dimension = len(embedding)
+
+                cursor.execute("""
+                    INSERT INTO embeddings (summary_id, embedding, dimension)
+                    VALUES (?, ?, ?)
+                """, (summary_id, embedding_bytes, dimension))
+
+            conn.commit()
         logger.info(f"Stored {len(summaries)} summaries with embeddings")
         return summary_ids
+    
+    def store_scraped_content(self, url: str, title: str, content: str, metadata: Dict[str, str]) -> int:
+        """
+        Store or update scraped content for a URL.
+        
+        Args:
+            url: Page URL
+            title: Page title
+            content: Full scraped content
+            metadata: Additional metadata as dict
+            
+        Returns:
+            Row ID of stored content
+        """
+        import json
+        
+        metadata_json = json.dumps(metadata) if metadata else "{}"
+        
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            
+            # Upsert: insert or update if URL exists
+            cursor.execute("""
+                INSERT INTO scraped_content (url, title, content, metadata, scraped_at, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(url) DO UPDATE SET
+                    title = excluded.title,
+                    content = excluded.content,
+                    metadata = excluded.metadata,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (url, title, content, metadata_json))
+            
+            # Get the actual row ID after upsert
+            cursor.execute("SELECT id FROM scraped_content WHERE url = ?", (url,))
+            row_id = cursor.fetchone()[0]
+            conn.commit()
+        
+        logger.debug(f"Stored scraped content for {url} ({len(content)} chars)")
+        return row_id
+    
+    def get_scraped_content(self, url: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve scraped content for a URL.
+        
+        Args:
+            url: Page URL
+            
+        Returns:
+            Dict with 'url', 'title', 'content', 'metadata', 'scraped_at' or None if not found
+        """
+        import json
+        
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT url, title, content, metadata, scraped_at, updated_at
+                FROM scraped_content
+                WHERE url = ?
+            """, (url,))
+            
+            row = cursor.fetchone()
+        
+        if row:
+            url, title, content, metadata_json, scraped_at, updated_at = row
+            return {
+                'url': url,
+                'title': title,
+                'content': content,
+                'metadata': json.loads(metadata_json) if metadata_json else {},
+                'scraped_at': scraped_at,
+                'updated_at': updated_at
+            }
+        return None
     
     def get_embedding(self, summary_id: int) -> Optional[np.ndarray]:
         """
         Retrieve embedding for a summary.
-        
+
         Args:
             summary_id: Summary ID
-            
+
         Returns:
             Embedding as numpy array or None
         """
-        conn = self._connect()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT embedding, dimension FROM embeddings
-            WHERE summary_id = ?
-        """, (summary_id,))
-        
-        row = cursor.fetchone()
-        conn.close()
-        
+        with self._connect() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT embedding, dimension FROM embeddings
+                WHERE summary_id = ?
+            """, (summary_id,))
+
+            row = cursor.fetchone()
+
         if row:
             embedding_bytes, dimension = row
             embedding = np.frombuffer(embedding_bytes, dtype=np.float32)
@@ -233,23 +342,24 @@ class VectorStore:
         """
         if not summary_ids:
             return []
-        conn = self._connect()
-        cursor = conn.cursor()
-        emb_bytes = np.array(query_embedding, dtype=np.float32).tobytes()
-        # Build parameterized IN clause
-        placeholders = ','.join(['?'] * len(summary_ids))
-        sql = f"""
-            SELECT s.id, cosine_sim(e.embedding, ?, e.dimension) AS score
-            FROM summaries s
-            JOIN embeddings e ON e.summary_id = s.id
-            WHERE s.id IN ({placeholders})
-            ORDER BY score DESC
-            LIMIT ?
-        """
-        params = [emb_bytes] + summary_ids + [top_k]
-        cursor.execute(sql, params)
-        rows = cursor.fetchall()
-        conn.close()
+
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            emb_bytes = np.array(query_embedding, dtype=np.float32).tobytes()
+            # Build parameterized IN clause
+            placeholders = ','.join(['?'] * len(summary_ids))
+            sql = f"""
+                SELECT s.id, cosine_sim(e.embedding, ?, e.dimension) AS score
+                FROM summaries s
+                JOIN embeddings e ON e.summary_id = s.id
+                WHERE s.id IN ({placeholders})
+                ORDER BY score DESC
+                LIMIT ?
+            """
+            params = [emb_bytes] + summary_ids + [top_k]
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+
         return [(int(r[0]), float(r[1])) for r in rows]
 
 class ContextAssembler:

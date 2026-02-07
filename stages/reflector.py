@@ -47,11 +47,13 @@ class Reflector:
         """
         logger.info(f"Reflecting on completeness of {len(summaries)} summaries for query")
         
-        # Build context from summaries
+        # Build context from summaries - truncate aggressively to avoid token limits
         summaries_text = "\n\n".join([
-            f"Source {i+1}: {summary.url}\n{summary.text[:500]}..."
-            for i, summary in enumerate(summaries)
+            f"Source {i+1}: {summary.url}\n{summary.text[:300]}..."
+            for i, summary in enumerate(summaries[:6])  # Limit to first 6 summaries
         ])
+        if len(summaries) > 6:
+            summaries_text += f"\n\n[... and {len(summaries) - 6} more sources]"
         
         prompt = f"""You are a research quality analyst. Analyze the research gathered so far and determine if it's sufficient to answer the user's query comprehensively.
 
@@ -102,12 +104,75 @@ Be critical but realistic. Minor gaps are acceptable if core query is well-addre
 """
         
         try:
-            response = self.llm_client.complete_json(
-                prompt=prompt,
+            logger.debug(f"Reflection prompt length: {len(prompt)} characters")
+            
+            # Use text completion and parse JSON manually - more reliable across models
+            text_response = self.llm_client.complete(
+                prompt=prompt + "\n\nIMPORTANT: Return ONLY a valid JSON object. No other text.",
                 model=self.model,
-                temperature=0.3,  # Lower temp for analytical assessment
-                max_tokens=1500,
+                temperature=0.3,
+                max_tokens=4000,  # Increased from 2000 to avoid truncation
             )
+            
+            logger.debug(f"Reflection response length: {len(text_response)} chars")
+            logger.debug(f"Reflection response preview: {text_response[:300]}...")
+            logger.debug(f"Reflection response ending: ...{text_response[-200:]}")
+            
+            # Parse JSON from the text response
+            import json
+            import re
+            # Try to extract JSON - first from markdown code block, then raw
+            json_str = None
+            # Look for ```json or ``` code blocks
+            code_match = re.search(r'```(?:json)?\s*\n(.*?)\n```', text_response, re.DOTALL)
+            if code_match:
+                json_str = code_match.group(1).strip()
+                logger.debug("Found JSON in markdown code block")
+            else:
+                # Look for raw JSON object
+                obj_match = re.search(r'(\{[\s\S]*\})', text_response)
+                if obj_match:
+                    json_str = obj_match.group(1).strip()
+                    logger.debug("Found raw JSON object")
+            
+            if json_str:
+                try:
+                    response = json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"JSON parse failed: {e}")
+                    logger.warning(f"JSON string length: {len(json_str)} chars")
+                    logger.warning(f"JSON ending (last 100 chars): ...{json_str[-100:]}")
+                    # Try to fix common issues - truncate at the last complete property
+                    last_brace = json_str.rfind('}')
+                    if last_brace > 0:
+                        truncated = json_str[:last_brace+1]
+                        try:
+                            response = json.loads(truncated)
+                            logger.info("Successfully parsed truncated JSON")
+                        except:
+                            # Try to extract just the required fields with regex
+                            is_complete_match = re.search(r'"is_complete"\s*:\s*(true|false)', json_str, re.IGNORECASE)
+                            confidence_match = re.search(r'"confidence"\s*:\s*(0?\.\d+|1\.0|1)', json_str)
+                            rationale_match = re.search(r'"rationale"\s*:\s*"([^"]*)"', json_str, re.DOTALL)
+                            
+                            if is_complete_match:
+                                response = {
+                                    "is_complete": is_complete_match.group(1).lower() == "true",
+                                    "confidence": float(confidence_match.group(1)) if confidence_match else 0.5,
+                                    "missing_information": [],
+                                    "additional_queries": [],
+                                    "rationale": rationale_match.group(1) if rationale_match else "Extracted from malformed response"
+                                }
+                                logger.info("Extracted required fields from malformed JSON")
+                            else:
+                                logger.error(f"Could not extract required fields from JSON: {json_str[:300]}")
+                                raise
+                    else:
+                        logger.error(f"Could not parse JSON: {json_str[:300]}")
+                        raise
+            else:
+                logger.error(f"No JSON found in response. Full response: {text_response[:500]}")
+                raise Exception("No JSON in response")
             
             is_complete = response.get("is_complete", False)
             confidence = response.get("confidence", 0.5)

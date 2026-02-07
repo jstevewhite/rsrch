@@ -189,17 +189,33 @@ IMPORTANT:
                     logger.warning("Claim missing source_numbers/source_number; skipping")
                     continue
                 
-                for source_number in numbers:
-                    if source_number in source_map:
+                # If multiple sources cited, check if claim should be split or verified against all
+                if len(numbers) > 1:
+                    # For multi-source claims, create a special composite claim
+                    # that will be verified against all cited sources
+                    valid_urls = [source_map[n] for n in numbers if n in source_map]
+                    if valid_urls:
                         claims.append(ExtractedClaim(
                             text=claim_data.get("text", "").strip(),
-                            source_number=source_number,
-                            source_url=source_map[source_number],
+                            source_number=numbers[0],  # Primary source for grouping
+                            source_url=source_map.get(numbers[0], valid_urls[0]),
                             claim_type=claim_data.get("type", "factual"),
                             context=claim_data.get("context", ""),
+                            additional_sources=[source_map[n] for n in numbers[1:] if n in source_map],
                         ))
-                    else:
-                        logger.warning(f"Claim references invalid source number: {source_number}")
+                else:
+                    for source_number in numbers:
+                        if source_number in source_map:
+                            claims.append(ExtractedClaim(
+                                text=claim_data.get("text", "").strip(),
+                                source_number=source_number,
+                                source_url=source_map[source_number],
+                                claim_type=claim_data.get("type", "factual"),
+                                context=claim_data.get("context", ""),
+                                additional_sources=[],
+                            ))
+                        else:
+                            logger.warning(f"Claim references invalid source number: {source_number}")
             
             # Fallback: if LLM returned no claims, try regex-based extraction of sentences with citations
             if not claims:
@@ -222,14 +238,17 @@ IMPORTANT:
                         valid_nums = [n for n in nums if n in source_map]
                         if not valid_nums:
                             continue
-                        for n in valid_nums:
-                            claims.append(ExtractedClaim(
-                                text=sentence,
-                                source_number=n,
-                                source_url=source_map[n],
-                                claim_type="factual",
-                                context=sentence,
-                            ))
+                        # Create a single claim with all sources (multi-source support)
+                        primary_num = valid_nums[0]
+                        additional_urls = [source_map[n] for n in valid_nums[1:]] if len(valid_nums) > 1 else None
+                        claims.append(ExtractedClaim(
+                            text=sentence,
+                            source_number=primary_num,
+                            source_url=source_map[primary_num],
+                            claim_type="factual",
+                            context=sentence,
+                            additional_sources=additional_urls,
+                        ))
                     if claims:
                         logger.info(f"Regex fallback extracted {len(claims)} claims")
                 except Exception as ex:
@@ -260,7 +279,7 @@ class ClaimVerifier:
         now = datetime.now()
         return f"{now.strftime('%B %d, %Y')} ({now.year})"
     
-    def __init__(self, llm_client: LLMClient, scraper: Scraper, model: str):
+    def __init__(self, llm_client: LLMClient, scraper: Scraper, model: str, vector_store=None):
         """
         Initialize claim verifier.
         
@@ -268,58 +287,89 @@ class ClaimVerifier:
             llm_client: LLM client for verification
             scraper: Scraper for re-fetching source content
             model: Model to use for verification
+            vector_store: Optional vector store for accessing cached scraped content
         """
         self.llm_client = llm_client
         self.scraper = scraper
         self.model = model
+        self.vector_store = vector_store
     
     def verify_all_sources(
         self,
-        claims_by_source: Dict[str, List[ExtractedClaim]]
+        claims_by_source: Dict[str, List[ExtractedClaim]],
+        scraped_cache: Optional[Dict[str, ScrapedContent]] = None
     ) -> Dict[str, List[VerificationResult]]:
         """
         Verify all claims, grouped by source.
-        
+
         Args:
             claims_by_source: Dictionary mapping source URL to claims
-            
+            scraped_cache: Optional cache of already-scraped content
+
         Returns:
             Dictionary mapping source URL to verification results
         """
         results_by_source = {}
-        
+
         for i, (url, claims) in enumerate(claims_by_source.items(), 1):
             logger.info(f"Verifying {len(claims)} claims from source {i}/{len(claims_by_source)}: {url}")
-            results = self.verify_source_claims(url, claims)
+            results = self.verify_source_claims(url, claims, scraped_cache=scraped_cache)
             results_by_source[url] = results
-        
+
         return results_by_source
     
     def verify_source_claims(
         self,
         source_url: str,
-        claims: List[ExtractedClaim]
+        claims: List[ExtractedClaim],
+        scraped_cache: Optional[Dict[str, ScrapedContent]] = None
     ) -> List[VerificationResult]:
         """
         Verify all claims from one source in a single LLM call.
-        
+
         Args:
             source_url: The source URL
             claims: List of claims from this source
-            
+            scraped_cache: Optional cache of already-scraped content
+
         Returns:
             List of verification results
         """
-        # Step 1: Re-scrape the source
-        logger.debug(f"Re-scraping {source_url}...")
-        try:
-            scraped = self.scraper.scrape_url(source_url)
-            if not scraped or not scraped.content:
-                logger.warning(f"Failed to scrape {source_url}")
-                return self._mark_unverifiable(claims, "Source unavailable or empty")
-        except Exception as e:
-            logger.error(f"Error scraping {source_url}: {e}")
-            return self._mark_unverifiable(claims, f"Scraping error: {str(e)}")
+        # Step 1: Get source content (from cache, DB, or scrape)
+        scraped = None
+        
+        # Try in-memory cache first
+        if scraped_cache and source_url in scraped_cache:
+            scraped = scraped_cache[source_url]
+            logger.debug(f"Using in-memory cached content for {source_url}")
+        # Try database cache
+        elif self.vector_store:
+            db_content = self.vector_store.get_scraped_content(source_url)
+            if db_content:
+                logger.debug(f"Using DB cached content for {source_url}")
+                from datetime import datetime
+                from ..models import ScrapedContent
+                scraped = ScrapedContent(
+                    url=db_content['url'],
+                    title=db_content['title'],
+                    content=db_content['content'],
+                    chunks=[],
+                    metadata=db_content['metadata'],
+                    retrieved_at=datetime.fromisoformat(db_content['scraped_at']) if db_content.get('scraped_at') else datetime.now()
+                )
+        
+        # Fall back to scraping
+        if not scraped:
+            logger.debug(f"Re-scraping {source_url} (not in cache or DB)...")
+            try:
+                scraped = self.scraper.scrape_url(source_url)
+            except Exception as e:
+                logger.error(f"Error scraping {source_url}: {e}")
+                return self._mark_unverifiable(claims, f"Scraping error: {str(e)}")
+
+        if not scraped or not scraped.content:
+            logger.warning(f"Failed to scrape {source_url}")
+            return self._mark_unverifiable(claims, "Source unavailable or empty")
         
         # Step 2: Check content length and truncate if needed
         source_text = self._prepare_source_content(scraped.content)
@@ -329,7 +379,8 @@ class ClaimVerifier:
             {
                 "id": i,
                 "claim": claim.text,
-                "type": claim.claim_type
+                "type": claim.claim_type,
+                "all_sources": [source_url] + (claim.additional_sources or [])
             }
             for i, claim in enumerate(claims)
         ], indent=2)
@@ -338,6 +389,7 @@ class ClaimVerifier:
         current_date = self._get_current_date_context()
         source_date = scraped.retrieved_at.strftime('%B %d, %Y') if scraped.retrieved_at else "Unknown"
         
+        # Build source content section with primary and additional sources
         prompt = f"""
 TASK: Verify if these claims are supported by the source content.
 
@@ -349,6 +401,7 @@ IMPORTANT VERIFICATION CONTEXT:
 - If the source explicitly states a fact, accept it as stated in the source
 - Example: If source says "President Trump" in 2025, verify based on source text, not your training knowledge
 - Focus on: Does the SOURCE support the claim? Not: Does your training data support it?
+- Note: Some claims cite multiple sources. Verify against THIS source only; partial support is acceptable if this source supports part of the claim.
 
 SOURCE: {source_url}
 
@@ -392,6 +445,8 @@ GUIDELINES:
 - Use "partial" for claims that are approximately correct but imprecise
 - Use "unsupported" if not mentioned in the source
 - Use "contradicted" ONLY if the source explicitly contradicts it (not your training data)
+- For claims citing multiple sources, mark as "partial" if this source supports only part of the claim
+- For absence claims (e.g., "no legislation was passed"), mark as "supported" if the source explicitly discusses the absence or confirms nothing happened
 - Provide exact quotes from the source as evidence when possible
 - Confidence scale:
   * 0.9-1.0 = very confident in verdict based on source
@@ -402,11 +457,62 @@ GUIDELINES:
         
         # Step 4: Get verification results
         try:
-            response = self.llm_client.complete_json(
-                prompt=prompt,
-                model=self.model,
-                temperature=0.1,  # Very low temperature for consistency
-            )
+            logger.debug(f"Verification prompt length: {len(prompt)} chars for {len(claims)} claims")
+            
+            # Use complete_json which has better retry and parsing logic
+            try:
+                response = self.llm_client.complete_json(
+                    prompt=prompt,
+                    model=self.model,
+                    temperature=0.1,
+                    max_tokens=2000,
+                )
+                logger.debug(f"Verification response keys: {list(response.keys())}")
+            except Exception as json_error:
+                logger.warning(f"complete_json failed: {json_error}, trying text mode fallback")
+                # Fallback to text mode if JSON mode fails
+                text_response = self.llm_client.complete(
+                    prompt=prompt + "\n\nRETURN ONLY VALID JSON - no explanatory text before or after.",
+                    model=self.model,
+                    temperature=0.1,
+                    max_tokens=2000,
+                )
+                
+                if not text_response or not text_response.strip():
+                    logger.error("Empty response from model")
+                    return self._mark_unverifiable(claims, "Model returned empty response")
+                
+                logger.debug(f"Text response length: {len(text_response)}, preview: {text_response[:200]}")
+                
+                # Parse JSON manually
+                json_str = None
+                code_match = re.search(r'```(?:json)?\s*\n(.*?)\n```', text_response, re.DOTALL)
+                if code_match:
+                    json_str = code_match.group(1).strip()
+                else:
+                    obj_match = re.search(r'(\{[\s\S]*\})', text_response)
+                    if obj_match:
+                        json_str = obj_match.group(1).strip()
+                
+                if not json_str:
+                    logger.error(f"No JSON found in response")
+                    return self._mark_unverifiable(claims, "No JSON in response")
+                
+                try:
+                    response = json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    # Try truncating at last }
+                    last_brace = json_str.rfind('}')
+                    if last_brace > 0:
+                        try:
+                            response = json.loads(json_str[:last_brace+1])
+                            logger.info("Parsed truncated JSON")
+                        except:
+                            logger.error(f"JSON parse failed: {e}")
+                            return self._mark_unverifiable(claims, f"JSON parse error: {e}")
+                    else:
+                        logger.error(f"JSON parse failed: {e}")
+                        return self._mark_unverifiable(claims, f"JSON parse error: {e}")
             
             return self._parse_verification_response(response, claims)
             
@@ -452,7 +558,17 @@ GUIDELINES:
             List of verification results
         """
         results = []
-        verifications = response.get("verifications", [])
+        
+        # Handle both formats: {"verifications": [...]} and single claim object
+        verifications = []
+        if "verifications" in response and isinstance(response["verifications"], list):
+            verifications = response["verifications"]
+        elif "claim_id" in response:
+            # LLM returned a single verification object instead of array
+            logger.debug("LLM returned single verification object, converting to array")
+            verifications = [response]
+        else:
+            logger.warning(f"Unexpected response format: {list(response.keys())}")
         
         for verification in verifications:
             claim_id = verification.get("claim_id")
@@ -464,7 +580,7 @@ GUIDELINES:
             results.append(VerificationResult(
                 claim=claim,
                 verdict=verification.get("verdict", "unsupported"),
-                confidence=float(verification.get("confidence", 0.0)),
+                confidence=float(verification.get("confidence", 0.5)),  # Default to 0.5 if not provided
                 evidence=verification.get("evidence"),
                 reasoning=verification.get("reasoning", "No reasoning provided"),
             ))

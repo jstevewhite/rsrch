@@ -71,10 +71,27 @@ class LLMClient:
         
         try:
             prompt_len = len(prompt) if isinstance(prompt, str) else sum(len(msg.get("content", "")) for msg in prompt)
-            logger.debug(f"Calling {model} with prompt length: {prompt_len}")
+            logger.info(f"→ LLM call: {model} (prompt: {prompt_len} chars, temp: {temperature}, json_mode: {json_mode})")
             response = self.client.chat.completions.create(**kwargs)
+            
+            # Log response details for debugging
+            if not response.choices:
+                logger.error(f"No choices in response! Response object: {response}")
+                return ""
+            
             content = response.choices[0].message.content
-            logger.debug(f"Received response length: {len(content)}")
+            
+            # Check if content is None
+            if content is None:
+                logger.error(f"Response content is None!")
+                logger.error(f"Response metadata - finish_reason: {response.choices[0].finish_reason}")
+                logger.error(f"Response metadata - model: {response.model}")
+                if hasattr(response, 'usage'):
+                    logger.error(f"Response usage: {response.usage}")
+                return ""
+            
+            logger.info(f"← LLM response: {len(content)} chars")
+            logger.debug(f"Response preview: {content[:200]}")
             
             # Optional: Detect refusals and auto-retry with stricter reminder
             if self.enable_policy and self._detect_refusal(content):

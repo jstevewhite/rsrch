@@ -1,7 +1,7 @@
 """Data models for the research pipeline."""
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from datetime import datetime
 from enum import Enum
 
@@ -87,7 +87,7 @@ class ContextPackage:
     query: Query
     plan: ResearchPlan
     summaries: List[Summary]
-    additional_context: Dict[str, str] = field(default_factory=dict)
+    additional_context: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -105,7 +105,7 @@ class Report:
     query: Query
     content: str
     citations: List[Citation]
-    metadata: Dict[str, str]
+    metadata: Dict[str, Any]
     generated_at: datetime = field(default_factory=datetime.now)
 
 
@@ -117,6 +117,7 @@ class ExtractedClaim:
     source_url: str             # Actual URL for that source
     claim_type: str             # factual|statistic|quote|date
     context: str = ""           # Surrounding text for context
+    additional_sources: Optional[List[str]] = None  # Additional source URLs for multi-source claims
 
 
 @dataclass

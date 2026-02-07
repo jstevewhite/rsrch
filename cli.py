@@ -10,19 +10,49 @@ from rsrch.config import Config
 from rsrch.pipeline import ResearchPipeline
 
 
+class ColoredFormatter(logging.Formatter):
+    """Logging formatter that adds color to console output."""
+    
+    # ANSI color codes
+    COLORS = {
+        'DEBUG': '\033[36m',      # Cyan
+        'INFO': '\033[32m',       # Green
+        'WARNING': '\033[33m',    # Yellow
+        'ERROR': '\033[91m',      # Bright Red
+        'CRITICAL': '\033[1;91m', # Bold Bright Red
+        'RESET': '\033[0m',       # Reset
+    }
+    
+    def format(self, record):
+        # Add color to levelname for console output
+        if hasattr(sys.stdout, 'isatty') and sys.stdout.isatty():
+            levelname = record.levelname
+            if levelname in self.COLORS:
+                record.levelname = f"{self.COLORS[levelname]}{levelname}{self.COLORS['RESET']}"
+        return super().format(record)
+
+
 def setup_logging(level: str = "INFO"):
-    """Configure logging."""
+    """Configure logging with colored console output."""
     numeric_level = getattr(logging, level.upper(), None)
     if not isinstance(numeric_level, int):
         numeric_level = logging.INFO
     
+    # Console handler with color
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(ColoredFormatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    ))
+    
+    # File handler without color
+    file_handler = logging.FileHandler("research_pipeline.log")
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    ))
+    
     logging.basicConfig(
         level=numeric_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler("research_pipeline.log"),
-        ],
+        handlers=[console_handler, file_handler],
     )
 
 
@@ -87,7 +117,7 @@ def main():
         print(f"{'='*80}")
         print(f"Query: {args.query}\n")
         
-        report = pipeline.run(args.query)
+        report = pipeline.run(args.query, show_plan=args.show_plan)
         
         print(f"\n{'='*80}")
         print(f"Report Generated Successfully")

@@ -83,10 +83,10 @@ class ResearchPipeline:
             api_key=config.embedding_api_key,
             model=config.embedding_model,
         )
-        vector_store = VectorStore(db_path=config.vector_db_path)
+        self.vector_store = VectorStore(db_path=config.vector_db_path)
         self.context_assembler = ContextAssembler(
             embedding_client=embedding_client,
-            vector_store=vector_store,
+            vector_store=self.vector_store,
             top_k_ratio=config.rerank_top_k_sum,  # Use summary-level ratio
         )
         
@@ -121,6 +121,7 @@ class ResearchPipeline:
                 llm_client=self.llm_client,
                 scraper=self.scraper,
                 model=config.verify_model,
+                vector_store=self.vector_store,
             )
             self.verification_reporter = VerificationReporter(
                 confidence_threshold=config.verify_confidence_threshold,
@@ -142,26 +143,35 @@ class ResearchPipeline:
                 f"If you see 429 (Too Many Requests) errors, reduce SUMMARY_PARALLEL."
             )
     
-    def run(self, query_text: str) -> Report:
-        """Run the complete research pipeline with iterative refinement."""
+    def run(self, query_text: str, show_plan: bool = False) -> Report:
+        """Run the complete research pipeline with iterative refinement.
+
+        Args:
+            query_text: The research query to investigate
+            show_plan: If True, print the research plan before executing
+        """
         logger.info(f"Starting research pipeline for query: {query_text[:100]}...")
-        
+
         # Stage 1: Parse query
         query = Query(text=query_text)
         logger.info("Stage 1: Query parsed")
-        
+
         # Stage 2: Identify intent
         logger.info("Stage 2: Identifying intent...")
         intent = self.intent_classifier.classify(query)
         logger.info(f"Intent identified: {intent.value}")
-        
+
         # Stage 3: Plan research
         logger.info("Stage 3: Planning research...")
         plan = self.planner.plan(query)
         logger.info(f"Research plan created with {len(plan.search_queries)} queries")
-        
+
+        if show_plan:
+            self._display_plan(plan, intent)
+
         # Initialize for iterative research
         all_summaries = []
+        all_scraped = {}  # Cache: url -> ScrapedContent
         iteration = 1
         max_iterations = self.config.max_iterations
         final_reflection = None  # Track final reflection result
@@ -183,7 +193,16 @@ class ResearchPipeline:
             except Exception as e:
                 logger.error(f"Research stage failed: {e}")
                 search_results = []
-        
+
+            # Fail fast on first iteration if no results found
+            if not search_results and not all_summaries:
+                if iteration == 1:
+                    logger.error("No search results found on initial research iteration")
+                    raise RuntimeError(
+                        "Search returned no results. Check your search provider "
+                        "configuration and API key. Query: " + query_text[:100]
+                    )
+
             # Stage 4.5: Rerank search results (before scraping)
             if self.search_reranker and search_results:
                 logger.info(f"Stage 4.5 (iter {iteration}): Reranking search results...")
@@ -203,7 +222,22 @@ class ResearchPipeline:
             try:
                 scraped_content = self.scraper.scrape_results(search_results)
                 logger.info(f"Scraped {len(scraped_content)} URLs")
-                
+
+                # Cache scraped content for later use (e.g., verification)
+                # Also store in database for future interactive queries
+                for sc in scraped_content:
+                    all_scraped[sc.url] = sc
+                    # Store in vector store's database
+                    try:
+                        self.vector_store.store_scraped_content(
+                            url=sc.url,
+                            title=sc.title,
+                            content=sc.content,
+                            metadata=sc.metadata
+                        )
+                    except Exception as store_err:
+                        logger.warning(f"Failed to store scraped content in DB for {sc.url}: {store_err}")
+
                 # Log scraper statistics
                 stats = self.scraper.get_fallback_usage_stats()
                 if stats['fallback_used'] > 0:
@@ -308,8 +342,10 @@ class ResearchPipeline:
                 )
                 
                 if claims_by_source:
-                    # Verify all claims
-                    results_by_source = self.claim_verifier.verify_all_sources(claims_by_source)
+                    # Verify all claims (pass scraped content cache to avoid re-scraping)
+                    results_by_source = self.claim_verifier.verify_all_sources(
+                        claims_by_source, scraped_cache=all_scraped
+                    )
                     
                     # Create summary and annotate report
                     verification_summary = self.verification_reporter.create_summary(results_by_source)
@@ -331,6 +367,24 @@ class ResearchPipeline:
         
         return report
     
+    def _display_plan(self, plan, intent) -> None:
+        """Print the research plan to stdout."""
+        print(f"\n{'='*80}")
+        print("Research Plan")
+        print(f"{'='*80}")
+        print(f"Intent: {intent.value}")
+        print(f"\nSections ({len(plan.sections)}):")
+        for i, section in enumerate(plan.sections, 1):
+            print(f"  {i}. {section}")
+        print(f"\nSearch Queries ({len(plan.search_queries)}):")
+        for i, sq in enumerate(plan.search_queries, 1):
+            priority_marker = f"[P{sq.priority}]" if sq.priority else ""
+            print(f"  {i}. {sq.query} {priority_marker}")
+            print(f"     Purpose: {sq.purpose}")
+        if plan.rationale:
+            print(f"\nRationale: {plan.rationale}")
+        print(f"{'='*80}\n")
+
     def _generate_report(self, query: Query, plan, summaries: list, reflection=None) -> Report:
         """Generate the final report from research summaries.
         
