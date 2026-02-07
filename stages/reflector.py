@@ -1,7 +1,7 @@
 """Reflection stage - analyzes research completeness and identifies gaps."""
 
 import logging
-from typing import List
+from typing import List, Optional
 from ..models import Query, ResearchPlan, Summary, ReflectionResult, SearchQuery
 from ..llm_client import LLMClient
 
@@ -216,3 +216,110 @@ Be critical but realistic. Minor gaps are acceptable if core query is well-addre
                 additional_queries=[],
                 rationale=f"Reflection failed, proceeding with available research. Error: {e}",
             )
+
+
+class GapValidator:
+    """Validates whether declared research gaps are actually present in the final report.
+
+    The reflector identifies gaps during the iterative research loop using truncated
+    summaries. By the time the full report is generated, many of those gaps may have
+    been addressed. This class checks the final report against declared gaps and
+    removes any that are actually covered.
+    """
+
+    def __init__(self, llm_client: LLMClient, model: str = "gpt-4o"):
+        """Initialize the gap validator.
+
+        Args:
+            llm_client: LLM client for validation
+            model: Model to use (reuses reflection model)
+        """
+        self.llm_client = llm_client
+        self.model = model
+        logger.info(f"GapValidator initialized with model: {model}")
+
+    def validate_gaps(
+        self,
+        report_content: str,
+        declared_gaps: List[str],
+        query: Query,
+    ) -> List[str]:
+        """Check which declared gaps are truly unaddressed in the final report.
+
+        Args:
+            report_content: The generated report text
+            declared_gaps: List of gap descriptions from reflection
+            query: Original query for context
+
+        Returns:
+            Filtered list containing only gaps that remain genuinely unaddressed
+        """
+        if not declared_gaps:
+            return []
+
+        gaps_list = "\n".join(f"{i+1}. {gap}" for i, gap in enumerate(declared_gaps))
+
+        # Truncate report if very long to stay within context limits
+        max_report_chars = 200000
+        report_text = report_content[:max_report_chars]
+        if len(report_content) > max_report_chars:
+            report_text += "\n\n[Report truncated for gap validation...]"
+
+        prompt = f"""You are a research quality analyst. A research report was generated for the query below.
+During the research process, the following information gaps were identified.
+Your task: determine which gaps are STILL genuinely unaddressed in the final report.
+
+Original Query: "{query.text}"
+
+Declared Gaps:
+{gaps_list}
+
+Final Report:
+{report_text}
+
+For each gap, determine if the report actually addresses it (even partially).
+A gap is "addressed" if the report contains substantive information about that topic,
+even if not exhaustive.
+
+Return a JSON object:
+{{
+  "remaining_gaps": [
+    "Gap description that is truly NOT addressed in the report"
+  ],
+  "removed_gaps": [
+    {{"gap": "Gap that was addressed", "evidence": "Brief section reference or topic showing it's covered"}}
+  ]
+}}
+
+Be strict about what counts as "unaddressed" -- if the report discusses the topic
+at all with factual content, the gap is addressed."""
+
+        try:
+            response = self.llm_client.complete_json(
+                prompt=prompt,
+                model=self.model,
+                temperature=0.2,
+                max_tokens=2000,
+            )
+
+            remaining = response.get("remaining_gaps", declared_gaps)
+            removed = response.get("removed_gaps", [])
+
+            if removed:
+                logger.info(f"Gap validation: {len(removed)}/{len(declared_gaps)} gaps were actually addressed in the report")
+                for r in removed:
+                    gap_text = r.get("gap", "unknown") if isinstance(r, dict) else str(r)
+                    evidence = r.get("evidence", "none")[:100] if isinstance(r, dict) else ""
+                    logger.debug(f"  Removed gap: {gap_text} (evidence: {evidence})")
+
+            if not remaining:
+                logger.info("Gap validation: ALL declared gaps are addressed in the report")
+            else:
+                logger.info(f"Gap validation: {len(remaining)} gaps remain unaddressed")
+
+            return remaining
+
+        except Exception as e:
+            logger.error(f"Gap validation failed: {e}")
+            # On failure, return original gaps (safe default)
+            return declared_gaps

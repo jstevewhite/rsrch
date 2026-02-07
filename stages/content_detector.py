@@ -1,4 +1,4 @@
-"""Content type detection using URL heuristics."""
+"""Content type detection and source authority classification using URL heuristics."""
 
 import logging
 from enum import Enum
@@ -165,3 +165,172 @@ class ContentPatterns:
             return ContentType.DOCUMENTATION
 
         return ContentType.GENERAL
+
+
+class SourceTier(Enum):
+    """Authority tier for source domains.
+
+    Used to weight verification confidence scores based on source authority.
+    """
+    TIER_1 = "tier_1"  # Authoritative: peer-reviewed, government, primary databases
+    TIER_2 = "tier_2"  # Professional: major news, official docs, established organizations
+    TIER_3 = "tier_3"  # Community: wikis, forums, user-generated content
+    TIER_4 = "tier_4"  # Unvetted: unknown blogs, unclassifiable
+
+
+class SourceTierClassifier:
+    """Classifies source URLs into authority tiers based on domain."""
+
+    # Tier 1: Authoritative - peer-reviewed journals, government, primary databases
+    TIER_1_DOMAINS: Set[str] = {
+        # Academic / peer-reviewed
+        'nature.com',
+        'science.org',
+        'sciencedirect.com',
+        'springer.com',
+        'ieee.org',
+        'acm.org',
+        'pubmed.ncbi.nlm.nih.gov',
+        'nih.gov',
+        'doi.org',
+        'jstor.org',
+        'plos.org',
+        'biorxiv.org',
+        'medrxiv.org',
+        'nejm.org',
+        'thelancet.com',
+        'bmj.com',
+        'cell.com',
+        'pnas.org',
+        'wiley.com',
+        'oxfordjournals.org',
+        'academic.oup.com',
+        'annualreviews.org',
+        'jamanetwork.com',
+        'acc.org',
+        'ahajournals.org',
+        'clinicaltrials.gov',
+        # Government
+        'cdc.gov',
+        'fda.gov',
+        'who.int',
+        'europa.eu',
+        'whitehouse.gov',
+        'congress.gov',
+        'sec.gov',
+        'census.gov',
+        'bls.gov',
+        'nist.gov',
+        'ema.europa.eu',
+    }
+
+    # Tier 1: TLDs that indicate institutional authority
+    TIER_1_TLDS: Set[str] = {'.gov', '.edu', '.mil'}
+
+    # Tier 2: Professional - major news, official documentation, established organizations
+    TIER_2_DOMAINS: Set[str] = {
+        # Major news organizations
+        'nytimes.com',
+        'apnews.com',
+        'reuters.com',
+        'bbc.com',
+        'bbc.co.uk',
+        'washingtonpost.com',
+        'wsj.com',
+        'bloomberg.com',
+        'ft.com',
+        'npr.org',
+        'economist.com',
+        'cnn.com',
+        'theguardian.com',
+        # Established tech news
+        'techcrunch.com',
+        'theverge.com',
+        'wired.com',
+        'arstechnica.com',
+        'forbes.com',
+        # Official documentation
+        'docs.python.org',
+        'docs.microsoft.com',
+        'learn.microsoft.com',
+        'developer.apple.com',
+        'developer.mozilla.org',
+        'cloud.google.com',
+        'aws.amazon.com',
+        # Pre-prints (not peer-reviewed but high quality)
+        'arxiv.org',
+        'researchgate.net',
+        'scholar.google.com',
+        # Medical news (professional)
+        'medscape.com',
+        'statnews.com',
+        'fiercepharma.com',
+    }
+
+    # Tier 2: Documentation host prefixes
+    TIER_2_HOST_PREFIXES: Set[str] = {'docs.', 'developer.', 'dev.', 'api.'}
+
+    # Tier 3: Community - user-generated, wikis, forums
+    TIER_3_DOMAINS: Set[str] = {
+        'wikipedia.org',
+        'en.wikipedia.org',
+        'reddit.com',
+        'stackoverflow.com',
+        'stackexchange.com',
+        'medium.com',
+        'quora.com',
+        'github.com',
+        'gitlab.com',
+        'dev.to',
+        'hashnode.dev',
+        'substack.com',
+        'wordpress.com',
+        'blogspot.com',
+        'fandom.com',
+        'healthline.com',
+        'webmd.com',
+        'verywellhealth.com',
+    }
+
+    @classmethod
+    def classify(cls, url: str) -> SourceTier:
+        """Classify a URL into an authority tier.
+
+        Args:
+            url: Source URL to classify
+
+        Returns:
+            SourceTier enum value (defaults to TIER_4 for unknown domains)
+        """
+        try:
+            parsed = urlparse(url)
+            host = (parsed.hostname or '').lower()
+        except Exception:
+            return SourceTier.TIER_4
+
+        if not host:
+            return SourceTier.TIER_4
+
+        # Check Tier 1 TLDs first (.gov, .edu, .mil)
+        for tld in cls.TIER_1_TLDS:
+            if host.endswith(tld):
+                return SourceTier.TIER_1
+
+        # Check Tier 1 domains
+        if ContentPatterns._match_domain(host, cls.TIER_1_DOMAINS):
+            return SourceTier.TIER_1
+
+        # Check Tier 2 domains
+        if ContentPatterns._match_domain(host, cls.TIER_2_DOMAINS):
+            return SourceTier.TIER_2
+
+        # Check Tier 2 host prefixes (docs.*, developer.*, etc.)
+        if any(host.startswith(prefix) for prefix in cls.TIER_2_HOST_PREFIXES):
+            return SourceTier.TIER_2
+
+        # Check Tier 3 domains
+        if ContentPatterns._match_domain(host, cls.TIER_3_DOMAINS):
+            return SourceTier.TIER_3
+
+        # Default: Tier 4 (unknown / unvetted)
+        return SourceTier.TIER_4

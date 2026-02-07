@@ -63,6 +63,13 @@ class Config:
     verify_claims: bool  # Enable claim verification stage
     verify_model: str  # Model to use for claim verification
     verify_confidence_threshold: float  # Minimum confidence for flagging
+    verify_tier_1_weight: float  # Confidence multiplier for authoritative sources
+    verify_tier_2_weight: float  # Confidence multiplier for professional sources
+    verify_tier_3_weight: float  # Confidence multiplier for community sources
+    verify_tier_4_weight: float  # Confidence multiplier for unvetted sources
+
+    # Gap Validation Configuration
+    validate_gaps: bool  # Enable post-report gap validation
     
     # Prompt Policy Configuration
     prompt_policy_include: bool  # Enable global prompt policy to prevent knowledge cutoff refusals
@@ -176,6 +183,11 @@ class Config:
             verify_claims=get_optional("VERIFY_CLAIMS", "false").lower() in ("true", "1", "yes"),
             verify_model=get_optional("VERIFY_MODEL", "gpt-4o-mini"),
             verify_confidence_threshold=float(get_optional("VERIFY_CONFIDENCE_THRESHOLD", "0.7")),
+            verify_tier_1_weight=float(get_optional("VERIFY_TIER_1_WEIGHT", "1.0")),
+            verify_tier_2_weight=float(get_optional("VERIFY_TIER_2_WEIGHT", "0.95")),
+            verify_tier_3_weight=float(get_optional("VERIFY_TIER_3_WEIGHT", "0.85")),
+            verify_tier_4_weight=float(get_optional("VERIFY_TIER_4_WEIGHT", "0.75")),
+            validate_gaps=get_optional("VALIDATE_GAPS", "true").lower() in ("true", "1", "yes"),
             
             prompt_policy_include=get_optional("PROMPT_POLICY_INCLUDE", "true").lower() in ("true", "1", "yes"),
             

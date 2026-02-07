@@ -128,6 +128,8 @@ class VerificationResult:
     confidence: float           # 0.0 to 1.0
     evidence: Optional[str]     # Supporting quote from source
     reasoning: str              # Brief explanation
+    source_tier: Optional[str] = None       # tier_1|tier_2|tier_3|tier_4
+    adjusted_confidence: Optional[float] = None  # Confidence after source tier weighting
 
 
 @dataclass
@@ -141,3 +143,5 @@ class VerificationSummary:
     flagged_claims: List[VerificationResult]
     avg_confidence: float
     by_source: Dict[str, List[VerificationResult]] = field(default_factory=dict)
+    low_tier_only_claims: List[VerificationResult] = field(default_factory=list)
+    tier_distribution: Dict[str, int] = field(default_factory=dict)
