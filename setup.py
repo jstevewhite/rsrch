@@ -15,8 +15,7 @@ setup(
         "requests",
         "beautifulsoup4",
         "python-dotenv",
-        "pathlib",
-        "perplexityai",
+        "numpy",
     ],
     entry_points={
         "console_scripts": [

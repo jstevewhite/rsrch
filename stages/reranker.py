@@ -2,7 +2,7 @@
 
 import logging
 import requests
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Any
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -13,7 +13,7 @@ class RankedItem:
     """A ranked item with its score."""
     index: int
     score: float
-    original_item: any
+    original_item: Any
 
 
 class RerankerClient:
@@ -300,7 +300,7 @@ class SearchResultReranker:
         self.top_k_ratio = top_k_ratio
         logger.info(f"Search result reranker initialized (top_k: {top_k_ratio*100:.0f}%)")
     
-    def rerank_search_results(self, query: str, search_results: List[any]) -> List[any]:
+    def rerank_search_results(self, query: str, search_results: List[Any]) -> List[Any]:
         """
         Rerank search results by relevance.
         

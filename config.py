@@ -40,15 +40,12 @@ class Config:
     
     # Domain Exclusions
     exclude_domains: List[str]
-    
+
     # Vector Database Configuration
     vector_db_path: Path
     embedding_model: str
     embedding_url: str
     embedding_api_key: Optional[str]
-
-    # Domain exclusions (optional)
-    exclude_domains: List[str]
     
     # Reranker Configuration
     reranker_url: Optional[str]
