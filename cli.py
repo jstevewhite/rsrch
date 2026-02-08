@@ -90,6 +90,11 @@ def main():
         action="store_true",
         help="Display the research plan before proceeding",
     )
+    parser.add_argument(
+        "--enable-two-pass",
+        action="store_true",
+        help="Enable two-pass report generation with verification-based revision (requires --verify)",
+    )
     
     args = parser.parse_args()
     
@@ -105,6 +110,14 @@ def main():
         # Override output directory if specified
         if args.output:
             config.output_dir = Path(args.output)
+        
+        # Override two-pass if specified
+        if args.enable_two_pass:
+            if not config.verify_claims:
+                logger.error("--enable-two-pass requires VERIFY_CLAIMS=true in .env")
+                sys.exit(1)
+            config.enable_two_pass = True
+            logger.info("Two-pass report generation enabled")
         
         # Initialize pipeline
         logger.info("Initializing research pipeline...")

@@ -3,9 +3,10 @@
 import logging
 from typing import Optional
 from pathlib import Path
+from datetime import datetime
 
 from .config import Config
-from .models import Query, Report
+from .models import Query, Report, ContextPackage
 from .llm_client import LLMClient
 from .stages import (
     IntentClassifier,
@@ -349,7 +350,7 @@ class ResearchPipeline:
         
         # Stage 9: Generate report
         logger.info("Stage 9: Generating report...")
-        report = self._generate_report(query, plan, final_summaries, final_reflection)
+        report = self._generate_draft_report(query, plan, final_summaries, final_reflection)
 
         # Stage 9.5: Validate declared gaps against actual report content
         if (self.gap_validator
@@ -379,8 +380,9 @@ class ResearchPipeline:
                 logger.warning("Continuing with original gap list")
 
         # Stage 10: Verify claims (OPTIONAL)
+        verification_summary = None
         if self.config.verify_claims and self.claim_extractor:
-            logger.info("Stage 10: Verifying claims...")
+            logger.info("Stage 10: Verifying draft report...")
             try:
                 # Extract claims and group by source
                 claims_by_source = self.claim_extractor.extract_and_group(
@@ -394,11 +396,69 @@ class ResearchPipeline:
                         claims_by_source, scraped_cache=all_scraped
                     )
                     
-                    # Create summary and annotate report
+                    # Create verification summary
                     verification_summary = self.verification_reporter.create_summary(results_by_source)
+                    
+                    logger.info(f"Draft verification: {verification_summary.supported_claims}/{verification_summary.total_claims} claims supported")
+                    
+                    # Two-pass logic: revise if enabled and issues found
+                    if self.config.enable_two_pass:
+                        problem_claims = (verification_summary.unsupported_claims + 
+                                        verification_summary.contradicted_claims)
+                        total_claims = verification_summary.total_claims
+                        
+                        if total_claims > 0 and problem_claims > 0:
+                            problem_ratio = problem_claims / total_claims
+                            
+                            if problem_ratio > self.config.two_pass_revision_threshold:
+                                # Save reference to draft before revision
+                                draft_report = report
+                                
+                                # Save draft if configured
+                                if self.config.two_pass_preserve_draft:
+                                    draft_path = self._save_draft_report(draft_report)
+                                    logger.info(f"Draft saved: {draft_path}")
+                                
+                                logger.warning(f"Revision triggered: {problem_claims}/{total_claims} ({problem_ratio:.1%}) claims problematic")
+                                
+                                # Stage 9b: Revise report
+                                logger.info("Stage 9b: Revising report with verification feedback...")
+                                context_pkg = ContextPackage(
+                                    query=query,
+                                    plan=plan,
+                                    summaries=final_summaries
+                                )
+                                report = self._revise_report(draft_report, verification_summary, context_pkg)
+                                
+                                # Log revision summary (compare draft vs final)
+                                self._log_revision_summary(draft_report, report, verification_summary)
+                                
+                                # Stage 10b: Re-verify revised report
+                                if self.config.two_pass_re_verify:
+                                    logger.info("Stage 10b: Re-verifying revised report...")
+                                    
+                                    # Re-extract and verify claims from revised report
+                                    claims_by_source = self.claim_extractor.extract_and_group(
+                                        report_text=report.content,
+                                        summaries=final_summaries
+                                    )
+                                    
+                                    if claims_by_source:
+                                        results_by_source = self.claim_verifier.verify_all_sources(
+                                            claims_by_source, scraped_cache=all_scraped
+                                        )
+                                        verification_summary = self.verification_reporter.create_summary(results_by_source)
+                                        
+                                        improvement = verification_summary.supported_claims - (total_claims - problem_claims)
+                                        logger.info(f"Revision improved: {verification_summary.supported_claims}/{verification_summary.total_claims} now supported (+{improvement} claims)")
+                            else:
+                                logger.info(f"Revision threshold not met ({problem_ratio:.1%} < {self.config.two_pass_revision_threshold:.1%}) - no revision")
+                        else:
+                            logger.info("All claims verified - no revision needed")
+                    
+                    # Annotate report with verification results
                     report = self.verification_reporter.annotate_report(report, verification_summary)
                     
-                    logger.info(f"✓ Verification complete: {verification_summary.supported_claims}/{verification_summary.total_claims} claims supported")
                     if verification_summary.flagged_claims:
                         logger.warning(f"⚠️  Flagged {len(verification_summary.flagged_claims)} claims for review")
                 else:
@@ -432,8 +492,8 @@ class ResearchPipeline:
             print(f"\nRationale: {plan.rationale}")
         print(f"{'='*80}\n")
 
-    def _generate_report(self, query: Query, plan, summaries: list, reflection=None) -> Report:
-        """Generate the final report from research summaries.
+    def _generate_draft_report(self, query: Query, plan, summaries: list, reflection=None) -> Report:
+        """Generate a draft report from research summaries.
         
         Args:
             query: Original query
@@ -641,3 +701,207 @@ Format the report in Markdown.
                     f.write(f"- {key}: {value}\n")
         
         return filepath
+    
+    def _save_draft_report(self, draft_report: Report) -> Path:
+        """Save draft report with _draft suffix for comparison.
+        
+        Args:
+            draft_report: Draft report to save
+            
+        Returns:
+            Path to saved draft file
+        """
+        timestamp = draft_report.generated_at.strftime("%Y%m%d_%H%M%S")
+        draft_filename = f"report_{timestamp}_draft.md"
+        draft_path = self.config.output_dir / draft_filename
+        
+        with open(draft_path, 'w', encoding='utf-8') as f:
+            f.write(draft_report.content)
+        
+        logger.debug(f"Draft report saved: {draft_path}")
+        return draft_path
+    
+    def _format_sources_for_revision(self, context_package) -> str:
+        """Format source summaries for revision prompt.
+        
+        Args:
+            context_package: Context with summaries
+            
+        Returns:
+            Formatted sources text
+        """
+        sources = []
+        for i, summary in enumerate(context_package.summaries):
+            sources.append(
+                f"[Source {i+1}] {summary.url}\n{summary.text[:800]}..."
+            )
+        return "\n\n".join(sources)
+    
+    def _log_revision_summary(
+        self,
+        draft_report: Report,
+        final_report: Report,
+        verification_summary
+    ) -> None:
+        """Log summary of changes between draft and final report.
+        
+        Args:
+            draft_report: Original draft report
+            final_report: Revised final report
+            verification_summary: Verification results that triggered revision
+        """
+        draft_words = len(draft_report.content.split())
+        final_words = len(final_report.content.split())
+        word_diff = final_words - draft_words
+        
+        problem_claims = (verification_summary.unsupported_claims + 
+                         verification_summary.contradicted_claims)
+        
+        logger.info("=" * 60)
+        logger.info("REVISION SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"Claims corrected: {problem_claims}")
+        logger.info(f"Draft: {draft_words} words")
+        logger.info(f"Final: {final_words} words ({word_diff:+d})")
+        
+        # Simple sentence-level diff
+        draft_sentences = set(draft_report.content.split('. '))
+        final_sentences = set(final_report.content.split('. '))
+        removed = len(draft_sentences - final_sentences)
+        added = len(final_sentences - draft_sentences)
+        
+        logger.info(f"Sentences: ~{removed} removed, ~{added} added")
+        logger.info("=" * 60)
+    
+    def _build_revision_prompt(
+        self,
+        draft_report: Report,
+        verification_summary,
+        context_package
+    ) -> str:
+        """Build prompt for report revision based on verification feedback.
+        
+        Args:
+            draft_report: Original draft report
+            verification_summary: Verification results with flagged claims
+            context_package: Source context for corrections
+            
+        Returns:
+            Revision prompt string
+        """
+        import json
+        
+        # Extract problematic claims (unsupported or contradicted)
+        problem_claims = [
+            c for c in verification_summary.flagged_claims
+            if c.verdict in ["unsupported", "contradicted"]
+        ]
+        
+        # Build structured feedback
+        feedback = []
+        for result in problem_claims:
+            feedback.append({
+                "claim": result.claim.text,
+                "verdict": result.verdict,
+                "reasoning": result.reasoning,
+                "evidence": result.evidence or "No supporting evidence found",
+                "source_url": result.claim.source_url
+            })
+        
+        sources_context = self._format_sources_for_revision(context_package)
+        
+        prompt = f"""TASK: Revise this research report to fix unsupported or contradicted claims identified during fact-checking.
+
+ORIGINAL REPORT (contains inaccuracies):
+{draft_report.content}
+
+VERIFICATION ISSUES ({len(problem_claims)} claims need correction):
+{json.dumps(feedback, indent=2)}
+
+AVAILABLE SOURCES FOR CORRECTIONS:
+{sources_context}
+
+REVISION INSTRUCTIONS:
+1. Locate each problematic claim in the report text
+2. For UNSUPPORTED claims:
+   - Remove entirely if no evidence exists in any source
+   - Revise using actual source evidence if available (use the evidence provided above)
+   - Add hedging language ("reportedly", "according to [source]") if evidence is weak or partial
+3. For CONTRADICTED claims:
+   - Correct the claim to match what sources actually state
+   - Use the specific evidence provided in the feedback
+4. Preserve all SUPPORTED claims exactly as originally written
+5. Maintain the report's structure, flow, and Markdown formatting
+6. Keep citation format consistent: [Source N]
+7. If removing a claim creates an empty paragraph, merge remaining content smoothly
+
+CRITICAL RULES:
+- ONLY use information from the provided sources - do NOT add facts from your training data
+- Do NOT "correct" source-backed facts with your knowledge
+- Preserve the report's tone, organization, and section structure
+- Keep all citation numbers consistent with the original sources
+- Ensure all factual assertions have proper source citations
+
+OUTPUT REQUIREMENTS:
+- Return the complete revised report in Markdown format
+- Include all original sections
+- Maintain professional research report style
+- Cite sources properly for all retained and corrected claims
+
+Begin the revised report below:
+"""
+        return prompt
+    
+    def _revise_report(
+        self,
+        draft_report: Report,
+        verification_summary,
+        context_package
+    ) -> Report:
+        """Revise report based on verification feedback.
+        
+        Args:
+            draft_report: Original draft report with issues
+            verification_summary: Verification results identifying problems
+            context_package: Source context for corrections
+            
+        Returns:
+            Revised report with corrections
+        """
+        logger.info("Building revision prompt with verification feedback...")
+        prompt = self._build_revision_prompt(
+            draft_report,
+            verification_summary,
+            context_package
+        )
+        
+        logger.debug(f"Revision prompt length: {len(prompt)} chars")
+        
+        try:
+            revised_content = self.llm_client.complete(
+                prompt=prompt,
+                model=self.config.report_model,
+                temperature=0.2,  # Low temperature for factual accuracy
+                max_tokens=self.config.report_max_tokens,
+            )
+            
+            # Create revised report with same metadata
+            revised_report = Report(
+                query=draft_report.query,
+                content=revised_content,
+                citations=draft_report.citations,  # Keep original citation list
+                metadata=draft_report.metadata.copy(),
+                generated_at=draft_report.generated_at
+            )
+            
+            # Add revision metadata
+            revised_report.metadata["revised"] = True
+            revised_report.metadata["revision_timestamp"] = datetime.now().isoformat()
+            
+            logger.info(f"Report revised successfully ({len(revised_content)} chars)")
+            return revised_report
+            
+        except Exception as e:
+            logger.error(f"Report revision failed: {e}")
+            logger.warning("Falling back to draft report")
+            return draft_report

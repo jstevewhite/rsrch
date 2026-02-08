@@ -67,6 +67,12 @@ class Config:
     verify_tier_2_weight: float  # Confidence multiplier for professional sources
     verify_tier_3_weight: float  # Confidence multiplier for community sources
     verify_tier_4_weight: float  # Confidence multiplier for unvetted sources
+    
+    # Two-Pass Report Generation
+    enable_two_pass: bool  # Enable verification-based revision
+    two_pass_preserve_draft: bool  # Save draft report with _draft suffix
+    two_pass_re_verify: bool  # Re-verify after revision
+    two_pass_revision_threshold: float  # Revise if this ratio of claims fail (0.0=any)
 
     # Gap Validation Configuration
     validate_gaps: bool  # Enable post-report gap validation
@@ -187,6 +193,13 @@ class Config:
             verify_tier_2_weight=float(get_optional("VERIFY_TIER_2_WEIGHT", "0.95")),
             verify_tier_3_weight=float(get_optional("VERIFY_TIER_3_WEIGHT", "0.85")),
             verify_tier_4_weight=float(get_optional("VERIFY_TIER_4_WEIGHT", "0.75")),
+            
+            # Two-pass configuration
+            enable_two_pass=get_optional("ENABLE_TWO_PASS", "false").lower() in ("true", "1", "yes"),
+            two_pass_preserve_draft=get_optional("TWO_PASS_PRESERVE_DRAFT", "true").lower() in ("true", "1", "yes"),
+            two_pass_re_verify=get_optional("TWO_PASS_RE_VERIFY", "true").lower() in ("true", "1", "yes"),
+            two_pass_revision_threshold=float(get_optional("TWO_PASS_REVISION_THRESHOLD", "0.0")),
+            
             validate_gaps=get_optional("VALIDATE_GAPS", "true").lower() in ("true", "1", "yes"),
             
             prompt_policy_include=get_optional("PROMPT_POLICY_INCLUDE", "true").lower() in ("true", "1", "yes"),
